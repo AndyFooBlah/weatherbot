@@ -1,0 +1,59 @@
+# Auto-generated workspace config for the Context Engineering Agent
+# (db-context-engineering@db-context-enrichment-marketplace v0.6.0).
+#
+# Format: flat `kind: source` / `kind: tool` blocks separated by `---`,
+# as expected by `uvx toolbox-server@1.4.0 --config autoctx/tools.yaml`
+# (the plugin invokes this on every workflow that touches the DB).
+#
+# Pre-populated by the prior Claude session so /autoctx-init recognizes
+# the workspace as already initialized and skips the connection-setup
+# Q&A. Source name `weatherbot-pg` matches the agent/toolbox.yaml
+# convention.
+#
+# Auth: Application Default Credentials + Cloud SQL IAM. Before launching
+# the Claude session that uses this file, run once:
+#     gcloud auth application-default login
+# and ensure your IAM identity has roles/cloudsql.instanceUser +
+# SELECT grants on the public schema (already in place for the
+# developer's user identity per infra/03-enable-gda-access.sh).
+#
+# To validate this file from a shell:
+#     source infra/env.sh
+#     uvx toolbox-server@1.4.0 --config autoctx/tools.yaml \
+#         invoke weatherbot-pg-list-schemas
+---
+kind: source
+name: weatherbot-pg
+type: cloud-sql-postgres
+project: ${PROJECT_ID}
+region: ${REGION}
+instance: ${SQL_INSTANCE}
+database: ${SQL_DB_NAME}
+---
+kind: tool
+name: weatherbot-pg-list-schemas
+type: postgres-list-tables
+source: weatherbot-pg
+description: |
+  List tables and schemas in the weatherbot database. Use the
+  progressive discovery pattern:
+    1. Fetch structure first (output_format='simple')
+    2. Drill into specific tables of interest
+    3. Use batching if the result is large
+
+  Tables of interest for context engineering:
+    sensors, sensor_readings, stations, unmonitored_locations
+  The legacy wide table (`observations`) and the legacy
+  `sensor_assignments` table still exist as safety nets but are
+  superseded by the narrow schema — ignore them unless explicitly
+  asked.
+---
+kind: tool
+name: weatherbot-pg-execute-sql
+type: postgres-execute-sql
+source: weatherbot-pg
+description: |
+  Execute SQL statements against the weatherbot database. The bound
+  IAM identity has SELECT only on the public schema — use for
+  validating golden_sql in evaluation datasets and for read-only
+  exploration during context authoring.

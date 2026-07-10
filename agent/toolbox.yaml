@@ -1,0 +1,374 @@
+# MCP Toolbox config for weatherbot.
+# Started by ./run-toolbox.sh, which sets the env vars referenced below.
+#
+# Env vars expected at runtime:
+#   PROJECT_ID, REGION, SQL_INSTANCE, SQL_DB_NAME, SQL_DB_USER,
+#   WEATHERBOT_DB_PASSWORD   (fetched from Secret Manager by run-toolbox.sh)
+
+sources:
+  weatherbot-pg:
+    kind: cloud-sql-postgres
+    project: ${PROJECT_ID}
+    region: ${REGION}
+    instance: ${SQL_INSTANCE}
+    database: ${SQL_DB_NAME}
+    user: ${SQL_DB_USER}
+    password: ${WEATHERBOT_DB_PASSWORD}
+
+  # Separate source for the Gemini Data Analytics QueryData tool — it requires
+  # a source implementing the GDA client interface, not a raw Postgres source.
+  weatherbot-gda:
+    kind: cloud-gemini-data-analytics
+    projectId: ${PROJECT_ID}
+
+tools:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Curated deterministic tools — agent should prefer these for common shapes.
+  #
+  # All curated tools target the *narrow* schema (sensors + sensor_readings)
+  # introduced in db/migrations/002_narrow_observations.sql. Each row in
+  # sensor_readings is (sensor_id, observed_at, value); join to sensors to
+  # resolve physical_location, display_name, unit, measurement_type, etc.
+  # ─────────────────────────────────────────────────────────────────────────
+
+  list_stations:
+    kind: postgres-sql
+    source: weatherbot-pg
+    description: |
+      List all weather stations on this account with their reporting windows.
+      Returns MAC address, name, lat/lon, and first/last observation times.
+      Use when the user asks which stations exist, or when they were active.
+    parameters: []
+    statement: |
+      SELECT mac_address, name, latitude, longitude,
+             first_seen_at, last_seen_at
+        FROM stations
+        ORDER BY last_seen_at DESC NULLS LAST
+
+  list_sensors:
+    kind: postgres-sql
+    source: weatherbot-pg
+    description: |
+      List sensors matching an optional location pattern and/or measurement
+      type. Returns one row per sensor with display_name, physical_location,
+      measurement_type, unit, reliable, and notes — everything you need to
+      pick the right sensor and report its reading correctly.
+
+      Use this when the user mentions a specific room ("garage", "pool",
+      "bedroom") OR a specific kind of reading ("temperature", "humidity",
+      "wind", "rain"). The result tells you which sensor_id(s) to read
+      from sensor_readings (or use latest_observation / observations_in_range
+      with the location/measurement_type filters directly).
+
+      Pass "%" or omit location_query to see every sensor. Inactive
+      sensors (e.g. retired pool sensor temp4f, kept for history) are
+      excluded by default — pass include_inactive=true to see them.
+    parameters:
+      - name: location_query
+        type: string
+        description: |
+          Case-insensitive LIKE pattern on physical_location. Examples:
+          "Garage", "%pool%", "Bedroom", "%". Omit to match all locations.
+        required: false
+      - name: measurement_type
+        type: string
+        description: |
+          Optional exact match on measurement_type. Canonical values:
+          temperature, humidity, dew_point, feels_like, wind_speed,
+          wind_gust, wind_direction, pressure, rain_rate, rain_total,
+          solar_radiation, uv_index, pm25, aqi, battery.
+        required: false
+      - name: include_inactive
+        type: boolean
+        description: |
+          Include retired sensors (e.g. the old pool sensor superseded
+          by a new channel). Default false.
+        required: false
+    statement: |
+      SELECT sensor_id, station_id, awn_field_name,
+             measurement_type, physical_location, display_name, unit,
+             sensor_kind, reliable, is_active, notes,
+             first_seen_at, last_seen_at
+        FROM sensors
+        WHERE physical_location ILIKE COALESCE($1, '%')
+          AND ($2::text IS NULL OR measurement_type = $2)
+          AND (COALESCE($3, false) OR is_active)
+        ORDER BY physical_location, measurement_type, display_name
+
+  list_unmonitored:
+    kind: postgres-sql
+    source: weatherbot-pg
+    description: |
+      List physical locations the user has but that are NOT covered by an
+      AWN sensor (e.g. the office). Call this if the user asks about a
+      place and list_sensors returns nothing for it — the answer might
+      just be "we don't measure that here."
+    parameters: []
+    statement: |
+      SELECT station_id, location, notes
+        FROM unmonitored_locations
+        ORDER BY location
+
+  latest_observation:
+    kind: postgres-sql
+    source: weatherbot-pg
+    description: |
+      The most recent reading for every active sensor (or a filtered
+      subset). Use for "right now", "current weather", "what's the
+      temperature in the garage".
+
+      Returns one row per matching sensor with display_name,
+      physical_location, measurement_type, unit, value, and the
+      observed_at timestamp of the most-recent reading. Inactive
+      sensors are excluded.
+
+      Filters are AND-combined and all optional:
+        - location:         "Garage", "Bedroom", "Outdoor", "Pool" (ILIKE)
+        - measurement_type: "temperature", "humidity", "pressure", etc.
+        - station_id:       MAC address (to scope to one station)
+
+      For a quick whole-house summary, call with no parameters and you
+      get the latest of every active sensor across all stations.
+    parameters:
+      - name: location
+        type: string
+        description: |
+          Optional case-insensitive LIKE pattern on physical_location.
+          Examples: "Garage", "%pool%", "Outdoor".
+        required: false
+      - name: measurement_type
+        type: string
+        description: |
+          Optional exact measurement_type filter. See list_sensors for
+          canonical values (temperature, humidity, wind_speed, …).
+        required: false
+      - name: station_id
+        type: string
+        description: Optional MAC address. Omit to query across stations.
+        required: false
+    statement: |
+      SELECT s.display_name,
+             s.physical_location,
+             s.measurement_type,
+             s.unit,
+             r.value,
+             r.observed_at,
+             s.sensor_id,
+             s.station_id,
+             s.reliable,
+             s.notes
+        FROM sensors s
+        JOIN latest_sensor_readings r ON r.sensor_id = s.sensor_id
+       WHERE s.is_active
+         AND s.physical_location ILIKE COALESCE($1, '%')
+         AND ($2::text IS NULL OR s.measurement_type = $2)
+         AND ($3::text IS NULL OR s.station_id        = $3)
+       ORDER BY s.physical_location, s.measurement_type, s.display_name
+
+  observations_in_range:
+    kind: postgres-sql
+    source: weatherbot-pg
+    description: |
+      Time series of readings for a single sensor (or sensor selection)
+      between two UTC timestamps. Returns one row per ~5-minute
+      observation per matching sensor. Use for time-series inspection
+      or charting.
+
+      You SHOULD specify ONE of (otherwise you get every sensor — fine for
+      a few-hour scan, but a 24-hour unfiltered call is ~10,000 rows and
+      will be truncated):
+        - sensor_id   exact key from list_sensors (sharp + recommended)
+        - location + measurement_type (e.g. "Pool" + "temperature")
+
+      For a chart, you MUST narrow to a single sensor — pass
+      location + measurement_type or sensor_id, otherwise multiple
+      sensor series get mixed together and the chart is meaningless.
+
+      Output is hard-capped at 5,000 rows (most recent first within the
+      window). Keep windows reasonable: a single sensor for a week is
+      ~2000 rows; whole-house can be much larger.
+    parameters:
+      - name: from_ts
+        type: string
+        description: Inclusive lower bound (ISO 8601 UTC, e.g. 2025-06-01T00:00:00Z).
+      - name: to_ts
+        type: string
+        description: Exclusive upper bound (ISO 8601 UTC).
+      - name: sensor_id
+        type: string
+        description: |
+          Optional exact sensor key (from list_sensors), e.g.
+          "AA:BB:CC:DD:EE:FF:temp7f".
+        required: false
+      - name: location
+        type: string
+        description: |
+          Optional case-insensitive LIKE pattern on physical_location.
+          Combine with measurement_type to scope a query without knowing
+          sensor_ids.
+        required: false
+      - name: measurement_type
+        type: string
+        description: |
+          Optional exact measurement_type filter (temperature, humidity,
+          rain_rate, etc.).
+        required: false
+      - name: row_limit
+        type: integer
+        description: |
+          Hard cap on returned rows. Server clamps to [1, 5000]; default
+          5000. Increase only when you actually need everything and have
+          already narrowed by sensor_id or location+measurement_type.
+        required: false
+    statement: |
+      SELECT observed_at, sensor_id, display_name, physical_location,
+             measurement_type, unit, value
+        FROM (
+          SELECT r.observed_at,
+                 s.sensor_id,
+                 s.display_name,
+                 s.physical_location,
+                 s.measurement_type,
+                 s.unit,
+                 r.value
+            FROM sensor_readings r
+            JOIN sensors s ON s.sensor_id = r.sensor_id
+           WHERE r.observed_at >= $1::timestamptz
+             AND r.observed_at <  $2::timestamptz
+             AND ($3::text IS NULL OR s.sensor_id = $3)
+             AND s.physical_location ILIKE COALESCE($4, '%')
+             AND ($5::text IS NULL OR s.measurement_type = $5)
+           ORDER BY r.observed_at DESC
+           LIMIT LEAST(GREATEST(COALESCE($6, 5000), 1), 5000)
+        ) capped
+       ORDER BY sensor_id, observed_at
+
+  summarize_period:
+    kind: postgres-sql
+    source: weatherbot-pg
+    description: |
+      Aggregate stats (min / max / avg / count + total for cumulative
+      measurements like rain) over a date range, grouped by sensor.
+      Use for "weather last week", "how hot did the pool get this month",
+      "how much rain fell in June".
+
+      Optional filters (same as latest_observation) scope the aggregation:
+        - location           ("Pool", "Outdoor", ...)
+        - measurement_type   ("temperature", "rain_total", "wind_gust", ...)
+        - station_id
+
+      Returns one row per matching sensor. For rain-style measurements
+      (measurement_type ending in "_total"), the `total` column is the
+      sum of values across the window; for everything else, treat the
+      total as informational only.
+    parameters:
+      - name: from_ts
+        type: string
+        description: Inclusive lower bound (ISO 8601 UTC).
+      - name: to_ts
+        type: string
+        description: Exclusive upper bound (ISO 8601 UTC).
+      - name: location
+        type: string
+        description: Optional case-insensitive LIKE pattern on physical_location.
+        required: false
+      - name: measurement_type
+        type: string
+        description: Optional exact measurement_type filter.
+        required: false
+      - name: station_id
+        type: string
+        description: Optional MAC address.
+        required: false
+    statement: |
+      SELECT s.sensor_id,
+             s.display_name,
+             s.physical_location,
+             s.measurement_type,
+             s.unit,
+             count(*)                              AS observation_count,
+             min(r.value)                          AS min_value,
+             max(r.value)                          AS max_value,
+             avg(r.value)::numeric(10,3)           AS avg_value,
+             sum(r.value)::numeric(12,3)           AS total_value
+        FROM sensor_readings r
+        JOIN sensors s ON s.sensor_id = r.sensor_id
+       WHERE r.observed_at >= $1::timestamptz
+         AND r.observed_at <  $2::timestamptz
+         AND s.physical_location ILIKE COALESCE($3, '%')
+         AND ($4::text IS NULL OR s.measurement_type = $4)
+         AND ($5::text IS NULL OR s.station_id      = $5)
+       GROUP BY s.sensor_id, s.display_name, s.physical_location,
+                s.measurement_type, s.unit
+       ORDER BY s.physical_location, s.measurement_type, s.display_name
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Open-ended NL→SQL via the Gemini Data Analytics API (QueryData).
+  # Structure verified against the Go config struct in
+  # googleapis/mcp-toolbox/internal/tools/cloudgda/cloudgda.go.
+  # ─────────────────────────────────────────────────────────────────────────
+  ask_data:
+    kind: cloud-gemini-data-analytics-query
+    source: weatherbot-gda         # the GDA-typed source defined above
+    description: |
+      Open-ended natural-language query over the weather database via
+      Google's Conversational Analytics API. Use only when the curated tools
+      above can't express the question (complex aggregations, multi-step
+      comparisons, "find the day when…", trend questions).
+
+      The model sees the narrow schema:
+        stations(mac_address, name, latitude, longitude, …)
+        sensors(sensor_id, station_id, awn_field_name, measurement_type,
+                physical_location, display_name, unit, sensor_kind,
+                reliable, is_active, retired_at, notes,
+                first_seen_at, last_seen_at)
+        sensor_readings(sensor_id, observed_at, value)
+        unmonitored_locations(station_id, location, notes)
+
+      Typical pattern: JOIN sensor_readings → sensors on sensor_id, then
+      filter on sensors.physical_location / sensors.measurement_type.
+    location: ${REGION}
+    context:
+      datasourceReferences:
+        cloudSqlReference:
+          databaseReference:
+            projectId:  ${PROJECT_ID}
+            region:     ${REGION}
+            instanceId: ${SQL_INSTANCE}
+            databaseId: ${SQL_DB_NAME}
+            engine:     POSTGRESQL
+            # Scope GDA to the narrow-schema tables only. The legacy wide
+            # observations + sensor_assignments tables still exist as a
+            # safety net but would confuse NL→SQL — keep them invisible
+            # to QueryData until they're dropped in a follow-up migration.
+            tableIds:
+              - stations
+              - sensors
+              - sensor_readings
+              - unmonitored_locations
+          # Authored context (templates / facets / value_searches) that
+          # teach QueryData our enum vocabulary and common query shapes.
+          # The actual JSON lives at agent/context-sets/weatherbot-narrow.json;
+          # it has to be uploaded once via Cloud SQL Studio (no gcloud /
+          # REST API for context-set upload yet — verified 2026-06-18).
+          #
+          # WITHOUT this, the planner emits
+          #     WHERE physical_location = 'pool'    -- lowercase, 0 rows
+          # because nothing tells it the column actually stores 'Pool'.
+          # The value_searches in the JSON do the case-normalization.
+          #
+          # The block between the ⟪AGENT_CONTEXT_BEGIN⟫/⟪AGENT_CONTEXT_END⟫
+          # markers is stripped by run-toolbox.sh and 05-deploy-toolbox.sh
+          # when WEATHERBOT_GDA_CONTEXT_SET_ID is unset / empty — keeps
+          # ask_data working (without authored context) until the upload
+          # step is done. Set the var in infra/env.sh after upload; format:
+          #   projects/${PROJECT_ID}/locations/${REGION}/contextSets/<id>
+          # Upload + redeploy steps: agent/context-sets/README.md
+          # ⟪AGENT_CONTEXT_BEGIN⟫
+          agentContextReference:
+            contextSetId: ${WEATHERBOT_GDA_CONTEXT_SET_ID}
+          # ⟪AGENT_CONTEXT_END⟫
+    generationOptions:
+      generateQueryResult: true
+      generateNaturalLanguageAnswer: true
+      generateExplanation: true

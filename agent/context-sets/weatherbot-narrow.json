@@ -1,0 +1,187 @@
+{
+  "_comment": [
+    "Context Set for QueryData / Conversational Analytics API targeting",
+    "the weatherbot narrow schema (sensors + sensor_readings + stations).",
+    "",
+    "Authored following the patterns documented in the Context Engineering",
+    "Agent plugin (db-context-engineering v0.6.0,",
+    "skills/context-generation-guide/), specifically the PostgreSQL",
+    "references for templates, facets, and value_searches.",
+    "",
+    "Upload via Cloud SQL Studio → Data Agents → Context Sets → Upload.",
+    "Then reference the resulting context-set resource name in",
+    "agent/toolbox.yaml ask_data tool under",
+    "context.datasourceReferences.cloudSqlReference.agentContextReference.contextSetId.",
+    "",
+    "Iterate on this file by re-running the bootstrap / hill-climb flows",
+    "from the db-context-engineering plugin once the workflow is loaded.",
+    "The `_comment` keys are stripped by Cloud SQL Studio on upload; they",
+    "exist purely as documentation for humans reading the file."
+  ],
+
+  "value_searches": [
+    {
+      "concept_type": "Sensor Location",
+      "description": "Fuzzy, case-insensitive match for the place a sensor is installed. Maps the user's spoken word (\"pool\", \"poul\", \"out side\") to the actual title-cased enum stored in sensors.physical_location: 'Outdoor', 'Bedroom', 'Garage', 'Pool', 'Pool (retired)'. Critical: WITHOUT this, the planner emits `WHERE physical_location = 'pool'` (lowercase) and silently returns zero rows.",
+      "query": "WITH TrigramMetrics AS (SELECT T.\"physical_location\" AS original_value, (T.\"physical_location\" <-> $value::text) AS normalized_dist FROM \"sensors\" T WHERE T.\"physical_location\" % $value::text) SELECT original_value AS value, 'sensors.physical_location' AS columns, 'Sensor Location' AS concept_type, normalized_dist AS distance, ''::text AS context FROM TrigramMetrics"
+    },
+    {
+      "concept_type": "Measurement Type",
+      "description": "Fuzzy match for what kind of reading the user wants. Maps colloquial words ('temp', 'temperature', 'humid', 'rain', 'wind speed', 'wind gust') to the canonical snake_case enum stored in sensors.measurement_type. Valid values: temperature, humidity, dew_point, feels_like, wind_speed, wind_gust, wind_direction, pressure, rain_rate, rain_total, solar_radiation, uv_index, pm25, aqi, battery.",
+      "query": "WITH TrigramMetrics AS (SELECT T.\"measurement_type\" AS original_value, (T.\"measurement_type\" <-> $value::text) AS normalized_dist FROM \"sensors\" T WHERE T.\"measurement_type\" % $value::text) SELECT original_value AS value, 'sensors.measurement_type' AS columns, 'Measurement Type' AS concept_type, normalized_dist AS distance, ''::text AS context FROM TrigramMetrics"
+    },
+    {
+      "concept_type": "Sensor Display Name",
+      "description": "Fuzzy match against the human-friendly sensor name (e.g. 'Pool temperature', 'Outdoor humidity', 'Bedroom dew point'). Useful when the user names a specific reading rather than a location + measurement type. Backed by a GiST trigram index on sensors.display_name.",
+      "query": "WITH TrigramMetrics AS (SELECT T.\"display_name\" AS original_value, (T.\"display_name\" <-> $value::text) AS normalized_dist FROM \"sensors\" T WHERE T.\"display_name\" % $value::text) SELECT original_value AS value, 'sensors.display_name' AS columns, 'Sensor Display Name' AS concept_type, normalized_dist AS distance, ''::text AS context FROM TrigramMetrics"
+    }
+  ],
+
+  "templates": [
+    {
+      "nl_query": "What's the current pool temperature?",
+      "sql": "SELECT s.display_name, s.unit, lr.observed_at, lr.value FROM sensors s JOIN LATERAL (SELECT observed_at, value FROM sensor_readings r WHERE r.sensor_id = s.sensor_id ORDER BY observed_at DESC LIMIT 1) lr ON true WHERE s.physical_location = 'Pool' AND s.measurement_type = 'temperature' AND s.is_active = true AND s.reliable = true",
+      "intent": "What's the current pool temperature?",
+      "manifest": "What's the current temperature at a given location?",
+      "parameterized": {
+        "parameterized_sql": "SELECT s.display_name, s.unit, lr.observed_at, lr.value FROM sensors s JOIN LATERAL (SELECT observed_at, value FROM sensor_readings r WHERE r.sensor_id = s.sensor_id ORDER BY observed_at DESC LIMIT 1) lr ON true WHERE s.physical_location = $1 AND s.measurement_type = 'temperature' AND s.is_active = true AND s.reliable = true",
+        "parameterized_intent": "What's the current temperature at $1?"
+      }
+    },
+    {
+      "nl_query": "What was the highest pool temperature in the last two weeks?",
+      "sql": "SELECT max(r.value) AS max_value, s.unit FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id WHERE s.physical_location = 'Pool' AND s.measurement_type = 'temperature' AND s.reliable = true AND r.observed_at >= now() - interval '14 days' GROUP BY s.unit",
+      "intent": "What was the highest pool temperature in the last 14 days?",
+      "manifest": "What was the highest temperature at a given location in the last a given number of days?",
+      "parameterized": {
+        "parameterized_sql": "SELECT max(r.value) AS max_value, s.unit FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id WHERE s.physical_location = $1 AND s.measurement_type = 'temperature' AND s.reliable = true AND r.observed_at >= now() - ($2 * interval '1 day') GROUP BY s.unit",
+        "parameterized_intent": "What was the highest temperature at $1 in the last $2 days?"
+      }
+    },
+    {
+      "nl_query": "Count of days in the last two weeks when the pool temperature was over 90",
+      "sql": "SELECT count(DISTINCT (r.observed_at AT TIME ZONE st.timezone)::date) AS day_count FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Pool' AND s.measurement_type = 'temperature' AND s.reliable = true AND r.value > 90 AND r.observed_at >= now() - interval '14 days'",
+      "intent": "On how many calendar days in the last 14 days did the pool temperature exceed 90 degrees?",
+      "manifest": "On how many calendar days in the last a given number of days did the temperature at a given location exceed a given number degrees?",
+      "parameterized": {
+        "parameterized_sql": "SELECT count(DISTINCT (r.observed_at AT TIME ZONE st.timezone)::date) AS day_count FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = $1 AND s.measurement_type = 'temperature' AND s.reliable = true AND r.value > $2 AND r.observed_at >= now() - ($3 * interval '1 day')",
+        "parameterized_intent": "On how many calendar days in the last $3 days did the temperature at $1 exceed $2 degrees?"
+      }
+    },
+    {
+      "nl_query": "What was the lowest outdoor temperature yesterday?",
+      "sql": "SELECT min(r.value) AS min_value, s.unit FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Outdoor' AND s.measurement_type = 'temperature' AND s.reliable = true AND (r.observed_at AT TIME ZONE st.timezone)::date = (now() AT TIME ZONE st.timezone)::date - 1 GROUP BY s.unit",
+      "intent": "What was the lowest outdoor temperature yesterday?",
+      "manifest": "What was the lowest temperature at a given location on a given date?",
+      "parameterized": {
+        "parameterized_sql": "SELECT min(r.value) AS min_value, s.unit FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = $1 AND s.measurement_type = 'temperature' AND s.reliable = true AND (r.observed_at AT TIME ZONE st.timezone)::date = $2::date GROUP BY s.unit",
+        "parameterized_intent": "What was the lowest temperature at $1 on $2?"
+      }
+    },
+    {
+      "nl_query": "Pool temperature hourly averages for the last 24 hours",
+      "sql": "SELECT date_trunc('hour', r.observed_at AT TIME ZONE st.timezone) AS hour_local, avg(r.value) AS avg_value, s.unit FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Pool' AND s.measurement_type = 'temperature' AND s.reliable = true AND r.observed_at >= now() - interval '24 hours' GROUP BY 1, s.unit ORDER BY 1",
+      "intent": "Pool temperature hourly averages for the last 24 hours",
+      "manifest": "Hourly averages of temperature at a given location for the last a given number of hours",
+      "parameterized": {
+        "parameterized_sql": "SELECT date_trunc('hour', r.observed_at AT TIME ZONE st.timezone) AS hour_local, avg(r.value) AS avg_value, s.unit FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = $1 AND s.measurement_type = 'temperature' AND s.reliable = true AND r.observed_at >= now() - ($2 * interval '1 hour') GROUP BY 1, s.unit ORDER BY 1",
+        "parameterized_intent": "Hourly averages of temperature at $1 for the last $2 hours"
+      }
+    },
+    {
+      "nl_query": "Average outdoor humidity last week",
+      "sql": "SELECT avg(r.value) AS avg_value, s.unit FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Outdoor' AND s.measurement_type = 'humidity' AND s.reliable = true AND (r.observed_at AT TIME ZONE st.timezone) >= date_trunc('week', (now() AT TIME ZONE st.timezone)) - interval '7 days' AND (r.observed_at AT TIME ZONE st.timezone) <  date_trunc('week', (now() AT TIME ZONE st.timezone)) GROUP BY s.unit",
+      "intent": "Average outdoor humidity last week (previous Monday–Sunday in local time)",
+      "manifest": "Average a given measurement type at a given location last week (previous Monday–Sunday in local time)",
+      "parameterized": {
+        "parameterized_sql": "SELECT avg(r.value) AS avg_value, s.unit FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = $1 AND s.measurement_type = $2 AND s.reliable = true AND (r.observed_at AT TIME ZONE st.timezone) >= date_trunc('week', (now() AT TIME ZONE st.timezone)) - interval '7 days' AND (r.observed_at AT TIME ZONE st.timezone) <  date_trunc('week', (now() AT TIME ZONE st.timezone)) GROUP BY s.unit",
+        "parameterized_intent": "Average $2 at $1 last week (previous Monday–Sunday in local time)"
+      }
+    },
+    {
+      "nl_query": "Peak wind gust over the last 30 days",
+      "sql": "SELECT max(r.value) AS peak_value, s.unit, (max(r.observed_at) AT TIME ZONE st.timezone) AS occurred_at_local FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.measurement_type = 'wind_gust' AND s.reliable = true AND r.observed_at >= now() - interval '30 days' GROUP BY s.unit, st.timezone",
+      "intent": "Peak wind gust over the last 30 days",
+      "manifest": "Peak a given measurement type over the last a given number of days",
+      "parameterized": {
+        "parameterized_sql": "SELECT max(r.value) AS peak_value, s.unit, (max(r.observed_at) AT TIME ZONE st.timezone) AS occurred_at_local FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.measurement_type = $1 AND s.reliable = true AND r.observed_at >= now() - ($2 * interval '1 day') GROUP BY s.unit, st.timezone",
+        "parameterized_intent": "Peak $1 over the last $2 days"
+      }
+    }
+  ],
+
+  "facets": [
+    {
+      "sql_snippet": "sensors.physical_location = 'Pool'",
+      "intent": "at the pool",
+      "manifest": "at a given location",
+      "parameterized": {
+        "parameterized_sql_snippet": "sensors.physical_location = $1",
+        "parameterized_intent": "at $1"
+      }
+    },
+    {
+      "sql_snippet": "sensors.measurement_type = 'temperature'",
+      "intent": "temperature readings",
+      "manifest": "a given measurement type readings",
+      "parameterized": {
+        "parameterized_sql_snippet": "sensors.measurement_type = $1",
+        "parameterized_intent": "$1 readings"
+      }
+    },
+    {
+      "sql_snippet": "sensors.reliable = true",
+      "intent": "trustworthy sensors only (e.g. excludes the offline rain gauge)",
+      "manifest": "trustworthy sensors only (e.g. excludes the offline rain gauge)",
+      "parameterized": {
+        "parameterized_sql_snippet": "sensors.reliable = true",
+        "parameterized_intent": "trustworthy sensors only (e.g. excludes the offline rain gauge)"
+      }
+    },
+    {
+      "sql_snippet": "sensors.is_active = true",
+      "intent": "active sensors only (excludes retired sensors)",
+      "manifest": "active sensors only (excludes retired sensors)",
+      "parameterized": {
+        "parameterized_sql_snippet": "sensors.is_active = true",
+        "parameterized_intent": "active sensors only (excludes retired sensors)"
+      }
+    },
+    {
+      "sql_snippet": "sensor_readings.observed_at >= now() - interval '24 hours'",
+      "intent": "in the last 24 hours",
+      "manifest": "in the last a given number of hours",
+      "parameterized": {
+        "parameterized_sql_snippet": "sensor_readings.observed_at >= now() - ($1 * interval '1 hour')",
+        "parameterized_intent": "in the last $1 hours"
+      }
+    },
+    {
+      "sql_snippet": "sensor_readings.observed_at >= now() - interval '14 days'",
+      "intent": "in the last two weeks",
+      "manifest": "in the last a given number of days",
+      "parameterized": {
+        "parameterized_sql_snippet": "sensor_readings.observed_at >= now() - ($1 * interval '1 day')",
+        "parameterized_intent": "in the last $1 days"
+      }
+    },
+    {
+      "sql_snippet": "(sensor_readings.observed_at AT TIME ZONE stations.timezone)::date = (now() AT TIME ZONE stations.timezone)::date",
+      "intent": "today (in the station's local timezone)",
+      "manifest": "today (in the station's local timezone)",
+      "parameterized": {
+        "parameterized_sql_snippet": "(sensor_readings.observed_at AT TIME ZONE stations.timezone)::date = (now() AT TIME ZONE stations.timezone)::date",
+        "parameterized_intent": "today (in the station's local timezone)"
+      }
+    },
+    {
+      "sql_snippet": "(sensor_readings.observed_at AT TIME ZONE stations.timezone)::date = (now() AT TIME ZONE stations.timezone)::date - 1",
+      "intent": "yesterday (in the station's local timezone)",
+      "manifest": "yesterday (in the station's local timezone)",
+      "parameterized": {
+        "parameterized_sql_snippet": "(sensor_readings.observed_at AT TIME ZONE stations.timezone)::date = (now() AT TIME ZONE stations.timezone)::date - 1",
+        "parameterized_intent": "yesterday (in the station's local timezone)"
+      }
+    }
+  ]
+}

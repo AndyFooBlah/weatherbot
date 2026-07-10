@@ -1,0 +1,92 @@
+[
+  {
+    "id": "wb_001_count_pool_over_90_last_2_weeks",
+    "database": "weatherbot",
+    "nlq": "Count of days in the last two weeks when the pool temperature was over 90.",
+    "golden_sql": "SELECT count(DISTINCT (r.observed_at AT TIME ZONE st.timezone)::date) AS day_count FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Pool' AND s.measurement_type = 'temperature' AND s.reliable = true AND r.value > 90 AND r.observed_at >= now() - interval '14 days'"
+  },
+  {
+    "id": "wb_002_lowest_outdoor_temp_yesterday",
+    "database": "weatherbot",
+    "nlq": "What was the lowest outdoor temperature yesterday?",
+    "golden_sql": "SELECT min(r.value) AS min_temp FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Outdoor' AND s.measurement_type = 'temperature' AND s.reliable = true AND (r.observed_at AT TIME ZONE st.timezone)::date = (now() AT TIME ZONE st.timezone)::date - 1"
+  },
+  {
+    "id": "wb_003_avg_outdoor_humidity_last_week",
+    "database": "weatherbot",
+    "nlq": "What was the average outdoor humidity last week?",
+    "golden_sql": "SELECT avg(r.value) AS avg_humidity FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Outdoor' AND s.measurement_type = 'humidity' AND s.reliable = true AND (r.observed_at AT TIME ZONE st.timezone) >= date_trunc('week', (now() AT TIME ZONE st.timezone)) - interval '7 days' AND (r.observed_at AT TIME ZONE st.timezone) <  date_trunc('week', (now() AT TIME ZONE st.timezone))"
+  },
+  {
+    "id": "wb_004_pool_hourly_avgs_last_24h",
+    "database": "weatherbot",
+    "nlq": "Show me the hourly average pool temperature for the last 24 hours.",
+    "golden_sql": "SELECT date_trunc('hour', r.observed_at AT TIME ZONE st.timezone) AS hour_local, avg(r.value) AS avg_temp FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Pool' AND s.measurement_type = 'temperature' AND s.reliable = true AND r.observed_at >= now() - interval '24 hours' GROUP BY 1 ORDER BY 1"
+  },
+  {
+    "id": "wb_005_current_pool_temp",
+    "database": "weatherbot",
+    "nlq": "What's the current pool temperature?",
+    "golden_sql": "SELECT s.display_name, s.unit, lr.observed_at, lr.value FROM sensors s JOIN LATERAL (SELECT observed_at, value FROM sensor_readings r WHERE r.sensor_id = s.sensor_id ORDER BY observed_at DESC LIMIT 1) lr ON true WHERE s.physical_location = 'Pool' AND s.measurement_type = 'temperature' AND s.is_active = true AND s.reliable = true"
+  },
+  {
+    "id": "wb_006_peak_wind_gust_last_30d",
+    "database": "weatherbot",
+    "nlq": "What was the peak wind gust in the last 30 days?",
+    "golden_sql": "SELECT max(r.value) AS peak_gust, s.unit FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id WHERE s.measurement_type = 'wind_gust' AND s.reliable = true AND r.observed_at >= now() - interval '30 days' GROUP BY s.unit"
+  },
+  {
+    "id": "wb_007_total_rain_last_month_reliable",
+    "database": "weatherbot",
+    "nlq": "How much rain fell last month?",
+    "golden_sql": "SELECT coalesce(sum(r.value), 0) AS total_rain FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id WHERE s.measurement_type = 'rain_total' AND s.reliable = true AND r.observed_at >= date_trunc('month', now() - interval '1 month') AND r.observed_at <  date_trunc('month', now())"
+  },
+  {
+    "id": "wb_008_hottest_day_this_summer",
+    "database": "weatherbot",
+    "nlq": "Which day was the hottest this summer?",
+    "golden_sql": "SELECT (r.observed_at AT TIME ZONE st.timezone)::date AS local_day, max(r.value) AS max_temp FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Outdoor' AND s.measurement_type = 'temperature' AND s.reliable = true AND (r.observed_at AT TIME ZONE st.timezone) >= '2026-06-01' AND (r.observed_at AT TIME ZONE st.timezone) <  '2026-09-01' GROUP BY 1 ORDER BY 2 DESC LIMIT 1"
+  },
+  {
+    "id": "wb_009_bedroom_over_80_summary",
+    "database": "weatherbot",
+    "nlq": "When was the bedroom over 80 degrees?",
+    "golden_sql": "SELECT min(r.observed_at AT TIME ZONE st.timezone) AS first_time_over_80_local, max(r.observed_at AT TIME ZONE st.timezone) AS last_time_over_80_local, count(*) AS reading_count FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Bedroom' AND s.measurement_type = 'temperature' AND s.reliable = true AND r.value > 80"
+  },
+  {
+    "id": "wb_010_list_stations",
+    "database": "weatherbot",
+    "nlq": "List all the weather stations.",
+    "golden_sql": "SELECT mac_address, name, latitude, longitude, timezone FROM stations ORDER BY name"
+  },
+  {
+    "id": "wb_011_pool_sensors",
+    "database": "weatherbot",
+    "nlq": "What sensors do I have in the pool?",
+    "golden_sql": "SELECT sensor_id, display_name, measurement_type, unit FROM sensors WHERE physical_location = 'Pool' AND is_active = true ORDER BY measurement_type"
+  },
+  {
+    "id": "wb_012_garage_temp_right_now",
+    "database": "weatherbot",
+    "nlq": "What's the temperature in the garage right now?",
+    "golden_sql": "SELECT s.display_name, s.unit, lr.observed_at, lr.value FROM sensors s JOIN LATERAL (SELECT observed_at, value FROM sensor_readings r WHERE r.sensor_id = s.sensor_id ORDER BY observed_at DESC LIMIT 1) lr ON true WHERE s.physical_location = 'Garage' AND s.measurement_type = 'temperature' AND s.is_active = true AND s.reliable = true"
+  },
+  {
+    "id": "wb_013_when_hottest_today_any_location",
+    "database": "weatherbot",
+    "nlq": "What time was the hottest temperature today?",
+    "golden_sql": "SELECT (r.observed_at AT TIME ZONE st.timezone)::timestamp AS local_time, r.value, s.unit, s.display_name, s.physical_location FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.measurement_type = 'temperature' AND s.reliable = true AND (r.observed_at AT TIME ZONE st.timezone)::date = (now() AT TIME ZONE st.timezone)::date ORDER BY r.value DESC NULLS LAST LIMIT 1"
+  },
+  {
+    "id": "wb_014_when_hottest_today_garage",
+    "database": "weatherbot",
+    "nlq": "What time was it hottest in the garage today?",
+    "golden_sql": "SELECT (r.observed_at AT TIME ZONE st.timezone)::timestamp AS local_time, r.value, s.unit, s.display_name, s.physical_location FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Garage' AND s.measurement_type = 'temperature' AND s.reliable = true AND (r.observed_at AT TIME ZONE st.timezone)::date = (now() AT TIME ZONE st.timezone)::date ORDER BY r.value DESC NULLS LAST LIMIT 1"
+  },
+  {
+    "id": "wb_015_when_coldest_yesterday_outdoor",
+    "database": "weatherbot",
+    "nlq": "What time was it coldest outside yesterday?",
+    "golden_sql": "SELECT (r.observed_at AT TIME ZONE st.timezone)::timestamp AS local_time, r.value, s.unit, s.display_name, s.physical_location FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Outdoor' AND s.measurement_type = 'temperature' AND s.reliable = true AND (r.observed_at AT TIME ZONE st.timezone)::date = (now() AT TIME ZONE st.timezone)::date - 1 ORDER BY r.value ASC NULLS LAST LIMIT 1"
+  }
+]
