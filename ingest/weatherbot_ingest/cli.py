@@ -367,5 +367,43 @@ def outage_report(
         typer.echo("\n(emailed)")
 
 
+@app.command("fill-gaps")
+def fill_gaps_cmd(
+    sensor_id: str = typer.Option(
+        None, "--sensor", help="Only this sensor_id (default: all active reliable)."
+    ),
+    days: int = typer.Option(120, "--days", help="Look back this many days for gaps."),
+    max_gap_hours: float = typer.Option(
+        48.0, "--max-gap-hours", help="Skip gaps longer than this (too uncertain)."
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="Actually insert estimated rows (default is dry run)."
+    ),
+) -> None:
+    """Fill closed outage gaps with diurnal-interpolated ESTIMATED readings.
+
+    Estimated rows are tagged is_estimated=true / estimation_method=
+    'diurnal_interp' and never overwrite measurements. Dry run by default —
+    prints what it would insert; pass --apply to write.
+    """
+    from . import gap_fill
+
+    s = gap_fill.fill_gaps(
+        sensor_id=sensor_id, days_back=days, max_gap_hours=max_gap_hours,
+        dry_run=not apply,
+    )
+    mode = "APPLIED" if apply else "DRY RUN"
+    typer.echo(f"[{mode}] {s['sensors']} sensor(s), {s['gaps']} gap(s), "
+               f"{s['rows_estimated']:,} estimated rows")
+    for ex in s["samples"]:
+        typer.echo(
+            f"  {ex['sensor']}: {ex['gap_hours']}h gap  "
+            f"{ex['from']} → {ex['to']}   midpoint est {ex['midpoint_est']} "
+            f"({ex['n_rows']} rows)"
+        )
+    if not apply and s["gaps"]:
+        typer.echo("\n(dry run — re-run with --apply to insert)")
+
+
 if __name__ == "__main__":
     app()

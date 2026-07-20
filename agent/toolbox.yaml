@@ -220,9 +220,17 @@ tools:
           5000. Increase only when you actually need everything and have
           already narrowed by sensor_id or location+measurement_type.
         required: false
+      - name: include_estimates
+        type: boolean
+        description: |
+          Default false → only real measurements. Set true to also include
+          gap-fill ESTIMATED readings (synthesized during sensor outages).
+          Each returned row carries an is_estimated flag either way; if you
+          surface estimated points, say they're estimates.
+        required: false
     statement: |
       SELECT observed_at, sensor_id, display_name, physical_location,
-             measurement_type, unit, value
+             measurement_type, unit, value, is_estimated
         FROM (
           SELECT r.observed_at,
                  s.sensor_id,
@@ -230,7 +238,8 @@ tools:
                  s.physical_location,
                  s.measurement_type,
                  s.unit,
-                 r.value
+                 r.value,
+                 r.is_estimated
             FROM sensor_readings r
             JOIN sensors s ON s.sensor_id = r.sensor_id
            WHERE r.observed_at >= $1::timestamptz
@@ -238,6 +247,7 @@ tools:
              AND ($3::text IS NULL OR s.sensor_id = $3)
              AND s.physical_location ILIKE COALESCE($4, '%')
              AND ($5::text IS NULL OR s.measurement_type = $5)
+             AND (COALESCE($7, false) OR r.is_estimated = false)
            ORDER BY r.observed_at DESC
            LIMIT LEAST(GREATEST(COALESCE($6, 5000), 1), 5000)
         ) capped
@@ -280,6 +290,15 @@ tools:
         type: string
         description: Optional MAC address.
         required: false
+      - name: include_estimates
+        type: boolean
+        description: |
+          Default false → aggregate only real measurements. Set true to also
+          fold in gap-fill ESTIMATED readings, which gives a less
+          gap-distorted average over windows that span sensor outages. The
+          result always reports estimated_count; if it's > 0 and you used
+          estimates, tell the user the average includes estimated fill.
+        required: false
     statement: |
       SELECT s.sensor_id,
              s.display_name,
@@ -287,6 +306,7 @@ tools:
              s.measurement_type,
              s.unit,
              count(*)                              AS observation_count,
+             count(*) FILTER (WHERE r.is_estimated) AS estimated_count,
              min(r.value)                          AS min_value,
              max(r.value)                          AS max_value,
              avg(r.value)::numeric(10,3)           AS avg_value,
@@ -297,6 +317,7 @@ tools:
          AND r.observed_at <  $2::timestamptz
          AND s.physical_location ILIKE COALESCE($3, '%')
          AND ($4::text IS NULL OR s.measurement_type = $4)
+         AND (COALESCE($6, false) OR r.is_estimated = false)
          AND ($5::text IS NULL OR s.station_id      = $5)
        GROUP BY s.sensor_id, s.display_name, s.physical_location,
                 s.measurement_type, s.unit
