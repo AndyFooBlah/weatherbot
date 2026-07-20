@@ -303,6 +303,92 @@ tools:
        ORDER BY s.physical_location, s.measurement_type, s.display_name
 
   # ─────────────────────────────────────────────────────────────────────────
+  # Event log — user-recorded annotations on the timeline. record_event is
+  # the only WRITE tool; the toolbox SA is granted INSERT on `events` only
+  # (see infra/05-deploy-toolbox.sh). Everything else is read-only.
+  # ─────────────────────────────────────────────────────────────────────────
+  record_event:
+    kind: postgres-sql
+    source: weatherbot-pg
+    description: |
+      Record a real-world event on the timeline — something the user did or
+      that happened that might explain or contextualize the sensor data
+      (moved a sensor, reset the base station, took the pool cover off, a
+      power outage, etc.). Use whenever the user says "record that…",
+      "log that…", "note that…", "make a note that…".
+
+      IMPORTANT: convert the user's local time-of-day into UTC before
+      calling. "10am this morning", "2pm yesterday", "an hour ago" all
+      refer to the user's local timezone (see the session time anchor);
+      pass occurred_at as a UTC ISO 8601 timestamp. If the user gives no
+      time ("record that I reset the sensor"), use the current time.
+    parameters:
+      - name: occurred_at
+        type: string
+        description: |
+          UTC ISO 8601 timestamp of WHEN THE EVENT HAPPENED (not now, unless
+          the user implies now). Convert the user's stated local time to UTC.
+        required: true
+      - name: note
+        type: string
+        description: The event description in the user's own words.
+        required: true
+      - name: category
+        type: string
+        description: |
+          Optional short tag to group events: "pool", "sensor",
+          "maintenance", "weather", "power". Omit if unclear.
+        required: false
+    statement: |
+      INSERT INTO events (occurred_at, note, category, source)
+      VALUES ($1::timestamptz, $2, $3, 'voice')
+      RETURNING event_id,
+                occurred_at,
+                note,
+                category,
+                created_at
+
+  list_events:
+    kind: postgres-sql
+    source: weatherbot-pg
+    description: |
+      List recorded events (things the user has logged), newest first,
+      within an optional time window and/or category. Use to recall what
+      happened ("what events did I record last week?", "when did I take the
+      pool cover off?") or to correlate a change in the data with something
+      physical the user did.
+    parameters:
+      - name: from_ts
+        type: string
+        description: Optional UTC ISO 8601 lower bound on the event time.
+        required: false
+      - name: to_ts
+        type: string
+        description: Optional UTC ISO 8601 upper bound on the event time.
+        required: false
+      - name: category
+        type: string
+        description: Optional exact category filter (pool, sensor, …).
+        required: false
+      - name: row_limit
+        type: integer
+        description: Max events to return. Default 50, capped at 500.
+        required: false
+    statement: |
+      SELECT event_id,
+             occurred_at,
+             note,
+             category,
+             source,
+             created_at
+        FROM events
+       WHERE ($1::timestamptz IS NULL OR occurred_at >= $1::timestamptz)
+         AND ($2::timestamptz IS NULL OR occurred_at <= $2::timestamptz)
+         AND ($3::text IS NULL OR category = $3)
+       ORDER BY occurred_at DESC
+       LIMIT LEAST(GREATEST(COALESCE($4, 50), 1), 500)
+
+  # ─────────────────────────────────────────────────────────────────────────
   # Open-ended NL→SQL via the Gemini Data Analytics API (QueryData).
   # Structure verified against the Go config struct in
   # googleapis/mcp-toolbox/internal/tools/cloudgda/cloudgda.go.

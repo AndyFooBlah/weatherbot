@@ -6,6 +6,7 @@
 #   - Service account                weatherbot-toolbox-sa
 #   - Cloud SQL IAM DB user          (SA, for GDA QueryData path)
 #   - Postgres GRANT SELECT          (on public schema, for the SA)
+#   - Postgres GRANT INSERT          (on events only — record_event tool)
 #   - Container image                .../weatherbot/toolbox:<git-sha>
 #   - Cloud Run service              weatherbot-toolbox (no-allow-unauth)
 #
@@ -122,6 +123,7 @@ PGPASSWORD="${DB_PASSWORD}" psql \
   -c "GRANT USAGE ON SCHEMA public TO \"${SA_DB_USER}\";" \
   -c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"${SA_DB_USER}\";" \
   -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO \"${SA_DB_USER}\";" \
+  -c "GRANT INSERT ON events TO \"${SA_DB_USER}\";" \
   >/dev/null
 
 kill "${PROXY_PID}" 2>/dev/null || true
