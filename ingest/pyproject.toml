@@ -9,6 +9,9 @@ dependencies = [
   "cloud-sql-python-connector>=1.20",
   "pg8000>=1.31",
   "typer>=0.12",
+  # Gmail API for the daily outage report (weatherbot outage-report --send)
+  "google-api-python-client>=2.120",
+  "google-auth>=2.30",
 ]
 
 [project.scripts]

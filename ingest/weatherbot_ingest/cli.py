@@ -345,5 +345,27 @@ def narrow_backfill() -> None:
     typer.echo("└─")
 
 
+@app.command("outage-report")
+def outage_report(
+    hours: int = typer.Option(24, "--hours", help="Lookback window in hours."),
+    send: bool = typer.Option(
+        False, "--send", help="Email the report (else print to stdout)."
+    ),
+) -> None:
+    """Report sensor gaps/outages over the lookback window.
+
+    Dry run (default) prints the report. `--send` emails it via the Gmail
+    API (requires the GMAIL_* secrets + REPORT_*_EMAIL env vars; see
+    docs/gmail-report-setup.md). This command is what the daily Cloud Run
+    Job runs with `--send`.
+    """
+    from . import outage_report as report
+
+    out = report.run(hours_back=hours, send=send)
+    typer.echo(out)
+    if send:
+        typer.echo("\n(emailed)")
+
+
 if __name__ == "__main__":
     app()
