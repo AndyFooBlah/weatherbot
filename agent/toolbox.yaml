@@ -323,64 +323,10 @@ tools:
                 s.measurement_type, s.unit
        ORDER BY s.physical_location, s.measurement_type, s.display_name
 
-  # ─────────────────────────────────────────────────────────────────────────
-  # Time helper — deterministic local→UTC conversion. The agent must use
-  # this instead of doing timezone offset math itself (that math is
-  # error-prone; an LLM once turned "9pm tonight" into the wrong day).
-  # ─────────────────────────────────────────────────────────────────────────
-  resolve_local_time:
-    kind: postgres-sql
-    source: weatherbot-pg
-    description: |
-      Convert a LOCAL wall-clock date + time into the exact UTC ISO 8601
-      timestamp to pass to any tool that needs one (record_event.occurred_at,
-      observations_in_range / summarize_period from_ts and to_ts, etc.).
-
-      ALWAYS call this to get a UTC timestamp from something the user said in
-      local time. NEVER compute the UTC offset in your head — that is exactly
-      what gets dates and times wrong.
-
-      Pass local_date as either an explicit local calendar date
-      (YYYY-MM-DD) OR one of the relative keywords 'today', 'tomorrow',
-      'yesterday'. Pass local_time as 24-hour local HH:MM. The server
-      resolves the keywords against the station's local timezone and returns
-      the exact UTC instant — no offset math on your side.
-
-      Worked examples (spoken → arguments), local time is the anchor above:
-        "9pm tonight"        → local_date='today',      local_time='21:00'
-        "6am tomorrow"       → local_date='tomorrow',   local_time='06:00'
-        "2:30pm yesterday"   → local_date='yesterday',  local_time='14:30'
-        "10am on July 4"     → local_date='2026-07-04',  local_time='10:00'
-      Returns: resolved_local_date, local_time, timezone, and utc_iso — use
-      utc_iso verbatim as the timestamp argument to the next tool.
-    parameters:
-      - name: local_date
-        type: string
-        description: "YYYY-MM-DD (local) OR one of: today, tomorrow, yesterday."
-        required: true
-      - name: local_time
-        type: string
-        description: "24-hour local time HH:MM (e.g. 21:00 for 9pm, 06:00 for 6am)."
-        required: true
-    statement: |
-      WITH tz AS (
-        SELECT COALESCE(min(timezone), 'America/Los_Angeles') AS zone FROM stations
-      ),
-      d AS (
-        SELECT CASE lower($1::text)
-                 WHEN 'today'     THEN (now() AT TIME ZONE (SELECT zone FROM tz))::date
-                 WHEN 'tomorrow'  THEN (now() AT TIME ZONE (SELECT zone FROM tz))::date + 1
-                 WHEN 'yesterday' THEN (now() AT TIME ZONE (SELECT zone FROM tz))::date - 1
-                 ELSE $1::text::date
-               END AS local_date
-      )
-      SELECT (SELECT local_date FROM d)                    AS resolved_local_date,
-             $2::text                                      AS local_time,
-             (SELECT zone FROM tz)                         AS timezone,
-             to_char(
-               (((SELECT local_date FROM d) + $2::text::time)
-                  AT TIME ZONE (SELECT zone FROM tz)) AT TIME ZONE 'UTC',
-               'YYYY-MM-DD"T"HH24:MI:SS"Z"')               AS utc_iso
+  # Note: resolve_local_time (local→UTC conversion) is a CLIENT-SIDE tool,
+  # not a toolbox tool — it's pure datetime arithmetic with no DB dependency,
+  # so the SPA handles it in-browser (weatherbot-app timeResolver.ts +
+  # dispatchWeatherbotTool). It's declared to Gemini via toolboxToolsClient.
 
   # ─────────────────────────────────────────────────────────────────────────
   # Event log — user-recorded annotations on the timeline. record_event is
