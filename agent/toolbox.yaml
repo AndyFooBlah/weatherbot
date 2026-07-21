@@ -153,21 +153,12 @@ tools:
              s.unit,
              r.value,
              r.observed_at,
-             to_char(r.observed_at AT TIME ZONE COALESCE(st.timezone, 'America/Los_Angeles'),
-                     'Dy Mon FMDD YYYY, FMHH12:MI AM')
-             || CASE ((r.observed_at AT TIME ZONE COALESCE(st.timezone, 'America/Los_Angeles'))::date
-                    - (now()         AT TIME ZONE COALESCE(st.timezone, 'America/Los_Angeles'))::date)
-                  WHEN 0  THEN ' (today)'
-                  WHEN -1 THEN ' (yesterday)'
-                  WHEN 1  THEN ' (tomorrow)'
-                  ELSE '' END AS observed_at_local,
              s.sensor_id,
              s.station_id,
              s.reliable,
              s.notes
         FROM sensors s
         JOIN latest_sensor_readings r ON r.sensor_id = s.sensor_id
-        LEFT JOIN stations st ON st.mac_address = s.station_id
        WHERE s.is_active
          AND s.physical_location ILIKE COALESCE($1, '%')
          AND ($2::text IS NULL OR s.measurement_type = $2)
@@ -379,15 +370,6 @@ tools:
       VALUES ($1::timestamptz, $2, $3, 'voice')
       RETURNING event_id,
                 occurred_at,
-                to_char(occurred_at AT TIME ZONE
-                        (SELECT COALESCE(min(timezone), 'America/Los_Angeles') FROM stations),
-                        'Dy Mon FMDD YYYY, FMHH12:MI AM')
-                || CASE ((occurred_at AT TIME ZONE (SELECT COALESCE(min(timezone), 'America/Los_Angeles') FROM stations))::date
-                       - (now()       AT TIME ZONE (SELECT COALESCE(min(timezone), 'America/Los_Angeles') FROM stations))::date)
-                     WHEN 0  THEN ' (today)'
-                     WHEN -1 THEN ' (yesterday)'
-                     WHEN 1  THEN ' (tomorrow)'
-                     ELSE '' END AS occurred_at_local,
                 note,
                 category,
                 created_at
@@ -421,15 +403,6 @@ tools:
     statement: |
       SELECT event_id,
              occurred_at,
-             to_char(occurred_at AT TIME ZONE
-                     (SELECT COALESCE(min(timezone), 'America/Los_Angeles') FROM stations),
-                     'Dy Mon FMDD YYYY, FMHH12:MI AM')
-             || CASE ((occurred_at AT TIME ZONE (SELECT COALESCE(min(timezone), 'America/Los_Angeles') FROM stations))::date
-                    - (now()       AT TIME ZONE (SELECT COALESCE(min(timezone), 'America/Los_Angeles') FROM stations))::date)
-                  WHEN 0  THEN ' (today)'
-                  WHEN -1 THEN ' (yesterday)'
-                  WHEN 1  THEN ' (tomorrow)'
-                  ELSE '' END AS occurred_at_local,
              note,
              category,
              source,
