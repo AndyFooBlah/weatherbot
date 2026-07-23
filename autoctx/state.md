@@ -23,6 +23,7 @@ The first one will be `accuracy-v1-baseline`.)
 
 | Experiment | Base context | Eval report | Gap analysis | Loop |
 |---|---|---|---|---|
+| evaldb-v4-candidate | weatherbot-narrow-v4 (uploaded 2026-07-23) | eval_reports (latest) — llmrater 13/15 (86.7%), executable 15/15 | Matches baseline. wb_014 recovered (golden fix + fresh trial). wb_007 pre-existing vocab gap. wb_009 NLQ ambiguity + facet nuance: is_estimated facet outcompeted reliable=true (v5 candidate: facet wording). PROD FLIPPED to v4 same day. | candidate→shipped |
 | evaldb-v3-baseline | weatherbot-narrow-v3 (uploaded) | eval_reports/86064dd6… — llmrater 13/15 (86.7%), executable 15/15 | wb_007: rain_rate vs rain-total vocabulary gap (facet candidate for v5). wb_014: empty-today artifact — snapshot seeded during a prod ingest gap (recovered); re-seed before eval runs. | baseline |
 
 ## Notes (updated 2026-07-23, weatherbot#15 L2 work)

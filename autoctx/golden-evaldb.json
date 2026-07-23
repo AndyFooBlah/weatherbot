@@ -51,7 +51,7 @@
   "id": "wb_009_bedroom_over_80_summary",
   "database": "weatherbot_eval",
   "nlq": "When was the bedroom over 80 degrees?",
-  "golden_sql": "SELECT min(r.observed_at AT TIME ZONE st.timezone) AS first_time_over_80_local, max(r.observed_at AT TIME ZONE st.timezone) AS last_time_over_80_local, count(*) AS reading_count FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Bedroom' AND s.measurement_type = 'temperature' AND s.reliable = true AND r.value > 80"
+  "golden_sql": "SELECT min(r.observed_at) AS first_time_over_80_utc, max(r.observed_at) AS last_time_over_80_utc, count(*) AS reading_count FROM sensor_readings r JOIN sensors s ON s.sensor_id = r.sensor_id JOIN stations st ON st.mac_address = s.station_id WHERE s.physical_location = 'Bedroom' AND s.measurement_type = 'temperature' AND s.reliable = true AND r.value > 80"
  },
  {
   "id": "wb_010_list_stations",
