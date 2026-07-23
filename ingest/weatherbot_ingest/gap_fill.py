@@ -158,9 +158,16 @@ def fill_gaps(
                 (sensor_id,),
             )
         else:
+            # Diurnal interpolation only makes sense for continuous
+            # measurements. Excluded: battery (a status flag — synthetic
+            # battery rows are noise, and 0→0 "estimates" carry no
+            # information) and wind_direction (circular 0–360°; linear
+            # interpolation across the 359°→1° wrap is simply wrong).
             cur.execute(
                 "SELECT sensor_id, display_name FROM sensors "
-                "WHERE is_active AND reliable ORDER BY physical_location, display_name"
+                "WHERE is_active AND reliable "
+                "  AND measurement_type NOT IN ('battery', 'wind_direction') "
+                "ORDER BY physical_location, display_name"
             )
         targets = cur.fetchall()
 
