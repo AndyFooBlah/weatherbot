@@ -25,10 +25,10 @@
 kind: source
 name: weatherbot-pg
 type: cloud-sql-postgres
-project: ${PROJECT_ID}
-region: ${REGION}
-instance: ${SQL_INSTANCE}
-database: ${SQL_DB_NAME}
+project: weatherbot-prod
+region: us-central1
+instance: weatherbot-db
+database: weatherbot
 ---
 kind: tool
 name: weatherbot-pg-list-schemas
@@ -57,3 +57,15 @@ description: |
   IAM identity has SELECT only on the public schema — use for
   validating golden_sql in evaluation datasets and for read-only
   exploration during context authoring.
+---
+# EVAL database source (weatherbot#15): the L2 context-set evals run
+# against the isolated weatherbot_eval snapshot (seeded by
+# infra/07-seed-eval-db.sh), never prod. Values hardcoded because the
+# plugin's config generator validates them without env interpolation.
+kind: source
+name: weatherbot-pg-eval
+type: cloud-sql-postgres
+project: weatherbot-prod
+region: us-central1
+instance: weatherbot-db
+database: weatherbot_eval

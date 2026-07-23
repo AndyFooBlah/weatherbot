@@ -23,7 +23,24 @@ The first one will be `accuracy-v1-baseline`.)
 
 | Experiment | Base context | Eval report | Gap analysis | Loop |
 |---|---|---|---|---|
-| _(empty — populated by /autoctx-evaluate)_ | | | | |
+| evaldb-v3-baseline | weatherbot-narrow-v3 (uploaded) | eval_reports/86064dd6… — llmrater 13/15 (86.7%), executable 15/15 | wb_007: rain_rate vs rain-total vocabulary gap (facet candidate for v5). wb_014: empty-today artifact — snapshot seeded during a prod ingest gap (recovered); re-seed before eval runs. | baseline |
+
+## Notes (updated 2026-07-23, weatherbot#15 L2 work)
+
+- **Eval DB**: L2 evals run against `weatherbot_eval` (source
+  `weatherbot-pg-eval` in autoctx/tools.yaml), never prod. Re-seed with
+  `bash infra/07-seed-eval-db.sh` before eval runs — the snapshot is
+  static and "today"-style cases go empty as it ages.
+- **Dataset**: `autoctx/golden-evaldb.json` = golden-seed with
+  database=weatherbot_eval and the 4 time-output goldens rewritten to
+  the v4 UTC contract (observed_at_utc / hour_utc / occurred_at_utc).
+  The v3 baseline is expected to diverge on those only in column
+  naming/timezone representation — the llmrater tolerated 3 of 4.
+- **Current prod set**: weatherbot-narrow-v3. Candidate:
+  agent/context-sets/weatherbot-narrow-v4.json (UTC outputs +
+  is_estimated guards), awaiting console upload; evaluate as
+  experiment `evaldb-v4-candidate` immediately after upload, compare
+  against evaldb-v3-baseline before flipping prod.
 
 ## Notes
 
