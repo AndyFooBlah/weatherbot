@@ -37,7 +37,12 @@ source "${SCRIPT_DIR}/env.sh"
 
 gcloud config set project "${PROJECT_ID}" >/dev/null
 
-SERVICE_NAME="weatherbot-toolbox"
+# Overridable for the eval deployment (08-deploy-eval-toolbox.sh):
+#   TOOLBOX_SERVICE_NAME — Cloud Run service name
+#   TOOLBOX_DB_NAME      — Postgres database the toolbox points at
+# Defaults deploy the production toolbox exactly as before.
+SERVICE_NAME="${TOOLBOX_SERVICE_NAME:-weatherbot-toolbox}"
+TOOLBOX_DB_NAME="${TOOLBOX_DB_NAME:-${SQL_DB_NAME}}"
 SA_NAME="weatherbot-toolbox-sa"
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 AR_REPO="weatherbot"
@@ -115,10 +120,10 @@ done
   echo "✗ proxy didn't start. Log:" >&2; cat "${PROXY_LOG}" >&2; exit 1; }
 
 DB_PASSWORD="$(gcloud secrets versions access latest --secret="${SECRET_DB_PASSWORD}")"
-echo "  → GRANT SELECT to ${SA_DB_USER} on public schema..."
+echo "  → GRANT SELECT to ${SA_DB_USER} on public schema of ${TOOLBOX_DB_NAME}..."
 PGPASSWORD="${DB_PASSWORD}" psql \
   -h 127.0.0.1 -p "${PROXY_PORT}" \
-  -U "${SQL_DB_USER}" -d "${SQL_DB_NAME}" \
+  -U "${SQL_DB_USER}" -d "${TOOLBOX_DB_NAME}" \
   -v ON_ERROR_STOP=1 \
   -c "GRANT USAGE ON SCHEMA public TO \"${SA_DB_USER}\";" \
   -c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"${SA_DB_USER}\";" \
@@ -171,7 +176,7 @@ gcloud builds submit "${BUILD_DIR}" \
 SERVICE_ENV_VARS="PROJECT_ID=${PROJECT_ID}"
 SERVICE_ENV_VARS+=",REGION=${REGION}"
 SERVICE_ENV_VARS+=",SQL_INSTANCE=${SQL_INSTANCE}"
-SERVICE_ENV_VARS+=",SQL_DB_NAME=${SQL_DB_NAME}"
+SERVICE_ENV_VARS+=",SQL_DB_NAME=${TOOLBOX_DB_NAME}"
 SERVICE_ENV_VARS+=",SQL_DB_USER=${SQL_DB_USER}"
 # Optional — full resource name of the QueryData context set that teaches
 # ask_data our schema vocabulary + golden templates. Empty value is OK:
