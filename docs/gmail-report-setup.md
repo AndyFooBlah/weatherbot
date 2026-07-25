@@ -1,85 +1,81 @@
 # Gmail setup for the daily outage report
 
-The daily outage report (`weatherbot outage-report --send`, run by the
-`weatherbot-outage-report` Cloud Run Job) emails via the Gmail API using an
-OAuth2 refresh token. This is the same pattern CarBot uses; weatherbot is a
-separate GCP project (`weatherbot-prod`), so it needs its own OAuth client +
-refresh token.
+One-time setup so the `weatherbot-outage-report` Cloud Run Job can send
+email via the Gmail API. Rewritten 2026-07-24 against the current
+console ("Google Auth Platform" — the old "OAuth consent screen" page
+this doc previously described no longer exists). Almost everything is
+automated by `scripts/setup-gmail-oauth.py`; the console part is two
+short steps.
 
-One-time setup:
+## Step 1 — console: consent screen + Desktop client (~3 minutes)
 
-## 1. Enable the Gmail API
+Open **APIs & Services → [Google Auth Platform](https://console.cloud.google.com/auth/overview?project=weatherbot-prod)**
+in the `weatherbot-prod` project. (Gmail API is already enabled.)
+
+1. **Branding** (first time only): set an app name (e.g. `weatherbot`)
+   and your email; everything else can stay empty.
+2. **Audience**: choose **External** if asked, then — this is the step
+   that matters — set the publishing status to **"In production"**
+   (there's a "Publish app" button on this tab).
+
+   > ⚠ **Do not leave the app in "Testing".** Google expires refresh
+   > tokens for Testing-status apps after **7 days**, which would
+   > silently kill the daily report a week after setup. "In production"
+   > without verification is fine for personal use — the only effect is
+   > an "unverified app" warning screen during your one-time consent
+   > click (click "Advanced → continue").
+3. **Clients → Create client**: application type **Desktop app**, any
+   name. Download the JSON (button on the client row / creation
+   dialog) — it lands as `~/Downloads/client_secret_….json`.
+
+## Step 2 — run the script (~1 minute)
 
 ```bash
-gcloud services enable gmail.googleapis.com --project=weatherbot-prod
+cd ~/dev/weatherbot
+python3 scripts/setup-gmail-oauth.py \
+    --client-json '~/Downloads/client_secret_*.json' \
+    --send-test andybrook@gmail.com     # optional sanity email
 ```
 
-## 2. Create an OAuth 2.0 client (Desktop app)
+The script opens your browser for the consent click (the one human
+step), then automatically: exchanges the code for a **refresh token**
+(loopback flow with PKCE + offline access), stores all three values in
+Secret Manager (`weatherbot-gmail-client-id` / `-client-secret` /
+`-refresh-token`), and grants `weatherbot-sync-sa` accessor on exactly
+those secrets. No third-party Python deps; secrets are passed on stdin
+and never printed.
 
-GCP Console → **APIs & Services → Credentials → Create Credentials → OAuth
-client ID → Application type: Desktop app** (in project `weatherbot-prod`).
-Note the **client ID** and **client secret**. (If prompted, configure the
-OAuth consent screen as "External", add yourself as a test user — no
-verification needed for personal use.)
+If it reports "no refresh_token", revoke the app's prior grant at
+<https://myaccount.google.com/permissions> and re-run (Google only
+reissues refresh tokens on a fresh consent).
 
-## 3. Get a refresh token
-
-Using the client ID/secret, run a one-off consent flow for the sending Gmail
-account, requesting the `gmail.send` scope. Any standard OAuth helper works;
-e.g. with the Google OAuth playground (https://developers.google.com/oauthplayground):
-- Gear icon → "Use your own OAuth credentials" → paste client ID + secret.
-- Authorize scope `https://www.googleapis.com/auth/gmail.send`.
-- Sign in as the sending account, approve.
-- Exchange the authorization code → copy the **refresh token**.
-
-(Or reuse the CarBot refresh-token acquisition script if you kept it — just
-point it at this project's client ID/secret and the `gmail.send` scope.)
-
-## 4. Store the three values in Secret Manager
+## Step 3 — deploy the job
 
 ```bash
-printf '%s' 'CLIENT_ID_HERE'     | gcloud secrets create weatherbot-gmail-client-id     --data-file=- --project=weatherbot-prod
-printf '%s' 'CLIENT_SECRET_HERE' | gcloud secrets create weatherbot-gmail-client-secret --data-file=- --project=weatherbot-prod
-printf '%s' 'REFRESH_TOKEN_HERE' | gcloud secrets create weatherbot-gmail-refresh-token --data-file=- --project=weatherbot-prod
-```
-
-(If the secrets already exist, use `gcloud secrets versions add <name> --data-file=-`.)
-
-Grant the sync service account access (it runs the report job):
-
-```bash
-for s in weatherbot-gmail-client-id weatherbot-gmail-client-secret weatherbot-gmail-refresh-token; do
-  gcloud secrets add-iam-policy-binding "$s" \
-    --member="serviceAccount:weatherbot-sync-sa@weatherbot-prod.iam.gserviceaccount.com" \
-    --role="roles/secretmanager.secretAccessor" --project=weatherbot-prod
-done
-```
-
-## 5. Set the email addresses in `infra/env.sh`
-
-```bash
-export REPORT_FROM_EMAIL="the-sending-account@gmail.com"
-export REPORT_TO_EMAIL="andybrook@gmail.com"
-```
-
-The three `SECRET_GMAIL_*` env vars default to the secret names above; only
-override them in `env.sh` if you named the secrets differently.
-
-## 6. Deploy the job + test
-
-```bash
-source infra/env.sh
 bash infra/06-deploy-report-job.sh
-gcloud run jobs execute weatherbot-outage-report --region=us-central1 --wait
 ```
 
-Check your inbox. The job then runs automatically every day at 8am local.
-
-## Testing without email
-
-The report generator works without any of the above — dry-run prints to
-stdout:
+Requires `REPORT_FROM_EMAIL` / `REPORT_TO_EMAIL` in `infra/env.sh`
+(already set). This creates the `weatherbot-outage-report` Cloud Run
+Job and the 8:00 AM America/Los_Angeles scheduler. Manual run to
+verify end-to-end:
 
 ```bash
-cd ingest && uv run weatherbot outage-report --hours 48
+gcloud run jobs execute weatherbot-outage-report \
+    --region=us-central1 --project=weatherbot-prod --wait
 ```
+
+You should receive the report email; subject escalates from "✓ all
+sensors healthy" to gap counts to "N sensors OFFLINE".
+
+## Notes
+
+- The OAuth client credentials for a desktop app are not treated as
+  confidential by Google's model, but we store them in Secret Manager
+  anyway and nothing ever ships to a browser bundle.
+- Token refresh happens inside the job (`outage_report.py`) using the
+  google-auth library; the stored refresh token is long-lived because
+  the app is in production status (see Step 1).
+- To rotate: revoke at myaccount.google.com/permissions, re-run
+  Step 2. To change recipients: edit REPORT_TO_EMAIL in env.sh and
+  re-run Step 3.
