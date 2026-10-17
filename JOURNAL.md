@@ -1,33 +1,34 @@
-# weatherbot journal
+# weatherbot — project journal
 
-Append-only. Every entry starts with a UTC timestamp and a tag. To correct an entry, append a new one that names the earlier entry's timestamp.
+Append-only. Every entry starts with a UTC timestamp and a tag
+(`[step] [decision] [friction] [learning] [surprise] [incident] [idea]
+[milestone]`). Never edit or delete a past entry; correct by appending
+a new entry that names the earlier one's timestamp. Synced daily to
+`andy-private-docs/journals/`.
 
-Entries before 2026-10-16 were backfilled on 2026-10-16 from this repo's git history, the post-mortem in `andy-private-docs/weatherbot/`, and session memory. Times marked `~` are approximate, inferred from the nearest commit or from the post-mortem's PT timeline. Companion repo: `weatherbot-app` (`~/dev/weatherbot-app/JOURNAL.md`).
+Entries up to 2026-10-16 were backfilled on 2026-10-16 from git
+history, GitHub issues, repo docs, and Claude session transcripts;
+timestamps are anchored to commits/issues where available, else
+day-accurate.
 
-- ~2026-06-18T04:30Z [incident] Owner reported every `ask_data` call from the production toolbox failing with `PERMISSION_DENIED: Error from Cloud SQL Instance 'weatherbot-db': [PERMISSION_DENIED] An internal backend error occurred.` The six curated SQL tools were unaffected — they use the toolbox's direct `cloud-sql-postgres` source, not Gemini Data Analytics. Issue #7.
-- ~2026-06-18T04:54Z [friction] First hypothesis was wrong and acted on anyway: Cloud SQL `sslMode` flipped to `ENCRYPTED_ONLY` on a guess that client-cert mode blocked the Data API. Owner pushed back ("the toolbox doesn't use the executeSQL Data API") and it was reverted eight minutes later. Net change zero, confidence falsely raised.
-- ~2026-06-18T14:00Z [step] Built a Cloud Run Job reproducer (`scripts/gda-egress-test/`) that fails reliably inside Cloud Run as the toolbox SA, and does not fail from a laptop using the same SA via impersonation.
-- ~2026-06-18T15:30Z [surprise] Cross-injecting a laptop-minted token into the Cloud Run Job still failed. Read at the time as "the failure is keyed on call origin". That was the wrong read — the variable was the impersonation chain, not the origin.
-- ~2026-06-18T18:00Z [incident] Resolved. Owner escalated to the QueryData engineering team, who returned the unwrapped server-side error: "Grant the caller the roles/serviceusage.serviceUsageConsumer role". Binding applied to `weatherbot-toolbox-sa`; toolbox and reproducer both green within minutes. ~13.5 hours from report to fix, of which ~6 were active client-side speculation. Post-mortem: `andy-private-docs/weatherbot/postmortem-2026-06-17-ask-data-permission-denied.md`.
-- ~2026-06-18T18:15Z [learning] `gcloud --impersonate-service-account` is not equivalent to "the SA running on Cloud Run". `serviceusage.services.use` walks the impersonation source-credential chain, so an Owner-role human impersonating an SA silently satisfies checks the SA alone fails. To test an SA's real IAM, attach it to a Cloud Run Job or VM.
-- ~2026-06-18T18:20Z [learning] When a first-party API wraps a downstream error, caller-side investigation can only ever reconstruct the missing message. Set a ~30-minute soft timer on speculation, then ask the API team for the server-side trace. Also: when A wraps B, call B directly with the same identity — that one experiment localized this failure to the GDA→Data API hop and should have been run ~5 hours sooner.
-- ~2026-06-18T18:30Z [step] Fix codified into `infra/05-deploy-toolbox.sh` and documented in `infra/03-enable-gda-access.sh` so a fresh deploy cannot reproduce it. Issue #7 closed.
-- 2026-07-10T17:09Z [milestone] Repository as it stands today begins: personal weather data pipeline and MCP tool layer. Ambient Weather Network station → Cloud SQL Postgres every 5 minutes via a Cloud Run Job, exposed over a private IAM-gated Cloud Run MCP Toolbox. (cbe107f)
-- 2026-07-10T17:09Z [surprise] The git history here starts after the June incident, so the post-mortem's fix commit `8599749` and issue #7 are not reachable from this tree. Treat the post-mortem, not git log, as the record for anything before this date.
-- 2026-07-10T18:47Z [step] SECURITY.md with private vulnerability reporting. (7a89ab0)
-- 2026-07-20T05:39Z [step] Events table plus voice-settable `record_event` / `list_events`, with an `is_estimated` flag on readings. (aa7fb4e)
-- 2026-07-20T05:46Z [step] Daily sensor-outage report by Gmail, as a Cloud Run Job. (e10a60c)
-- 2026-07-20T05:52Z [decision] Gap-fill with diurnal-interpolated estimates rather than leaving holes, and make the curated tools estimate-aware so an estimate is always disclosed as one. Fabrication without disclosure is the failure mode being designed against. (3135ed1)
-- 2026-07-21T03:58Z [decision] Stop the LLM doing date arithmetic: added `resolve_local_time`, a deterministic local→UTC resolver. (13b88d7)
-- 2026-07-21T04:07Z [learning] `resolve_local_time` did not belong in the database — it has no data dependency, so it moved client-side and lost a network round-trip. (1368269)
-- 2026-07-21T04:38Z [step] Tools return pre-converted `*_local` timestamps for speech, later carrying `(today)`/`(yesterday)`/`(tomorrow)` markers so the agent never has to infer the relative day itself. (d7008b1, 820fb29)
-- 2026-07-21T19:06Z [decision] All tools go UTC-only, with the v4 context set teaching UTC outputs and estimate-awareness. Conversion to local happens at the edges, never in the middle. (8b1cda3)
-- 2026-07-23T01:40Z [milestone] Eval data plane: a separate `weatherbot_eval` database on the same Cloud SQL instance, a seeder that does a server-side export/import with a whole-day time shift, and fixtures F1 (gap) and F2 (events). `weatherbot-toolbox-eval` is the same image pointed at it. (77393a3, P1a)
-- 2026-07-23T21:26Z [milestone] L2 context-set evals live: EvalBench v3 baseline scored against the eval DB. (966c3c1, #15)
-- 2026-07-23T21:40Z [decision] v4 candidate scored 13/15, equal to baseline, so production flipped to v4 — the rule being "≥ baseline before flipping `WEATHERBOT_GDA_CONTEXT_SET_ID`", not "strictly better". (f209785, #15)
-- 2026-07-23T22:57Z [step] Battery and wind direction excluded from gap-fill estimation; interpolating them produces plausible nonsense. (1d3cf13)
-- 2026-07-25T04:47Z [friction] Gmail OAuth setup had drifted from the current console UI; rewritten as a one-command script plus a doc matching what the console actually shows. (7081579)
-- ~2026-07-25T05:00Z [learning] The db-context-engineering plugin's config generator writes to its own cwd (`~/dev/autoctx/...`), not the repo — outputs have to be moved in by hand. Context sets also evaluate by uploaded resource ID, so the console upload is the real gate.
-- 2026-09-18T23:20Z [step] Filled in the Apache-2.0 appendix copyright line. (6baed36)
-- ~2026-09-19T00:00Z [learning] This repo is the backend only: Cloud SQL, the eval DB and seeder, autoctx context sets. No Live API, no voice-common, no VAD — that is all `weatherbot-app`. Confusing the two cost time twice in one session.
-- ~2026-10-16T00:00Z [idea] Open from the last context-set pass: v5 hillclimb candidates recorded in `autoctx/state.md` (a rain-vocabulary facet, and an `is_estimated`-vs-reliable facet that competes with it).
+---
+
+- 2026-06-17T22:00Z [incident] ask_data returned wrapped `PERMISSION_DENIED` only from Cloud Run; ~13 hours of caller-side debugging that server-side trace resolved in minutes. Root causes and rules captured in docs/postmortem-2026-06-17-ask-data-permission-denied.md (impersonation-chain IAM trap; escalate wrapped 1P errors early).
+- 2026-07-10T17:09Z [milestone] Repo created: ingest pipeline (AWN → Cloud SQL Postgres), MCP Toolbox tool layer on Cloud Run, QueryData/ask_data path with context sets (cbe107f).
+- 2026-07-19T20:00Z [step] Outage forensics after owner reported backyard sensors needing base-station restarts: 90.5% coverage over 90 days on outdoor temperature, 33 gaps ≈ 2,448 lost readings, six ~22h gaps in early July, recoveries clustered at dawn, Pool-array gaps co-occur → base-station/RF cause; heat ruled out (gaps start at 55–60°F). Data during disconnects is LOST, not buffered.
+- 2026-07-19T21:00Z [decision] Owner commissioned three features: "First is to send me a daily report of outages. Second is to add a new column to the sensor readings which carries the actual vs estimated state… tagged explicitly as estimates rather than actual measurements. And third, we should add a new table to track misc events… settable via the weatherbot." Report delivery: "Email via Gmail API."
+- 2026-07-20T05:52Z [milestone] All three features built: events table + record_event/list_events (aa7fb4e), daily outage report job (e10a60c), is_estimated column + diurnal gap-fill with estimate-aware curated tools (3135ed1). Estimate safety: curated tools measured-only by default, include_estimates opt-in with estimated_count disclosure.
+- 2026-07-21T04:00Z [incident] Owner field test: "I'll refill the bird feeder at 9pm tonight" recorded a day late (LLM did the UTC offset math). Start of the time-correctness saga.
+- 2026-07-21T04:07Z [decision] First fix put timezone conversion in a postgres-sql tool; owner pushback: "why are you using the database to perform timezone conversions? Can that be simply implemented in the application code?" Moved client-side (1368269). Owner's framing became the requirement: "a really robustly tested local function (no database calls) that can correctly map natural language into points in time" — the seed of nl2time.
+- 2026-07-21T05:08Z [learning] Three escalating head-math failure modes, each fixed by making the data deterministic: tools return *_local speech strings (d7008b1), then (today)/(yesterday) markers (820fb29) — the model cannot be trusted with ANY date arithmetic, including absolute→relative labeling.
+- 2026-07-21T19:06Z [milestone] nl2time adopted; ALL tools reverted to pure UTC; v4 context set authored by make_v4.py (UTC outputs + is_estimated guards), all 19 templates EXPLAIN-verified (8b1cda3). Conversion now happens only at the client boundary.
+- 2026-07-23T01:40Z [milestone] Eval data plane (#15): weatherbot_eval DB seeded server-side via GCS export/import (~3 GB, whole-day time shift, fixtures), weatherbot-toolbox-eval deployed, write isolation proven (77393a3).
+- 2026-07-23T21:26Z [step] EvalBench L2 evals live against the eval DB; v3 baseline llmrater 13/15, executable 15/15 (966c3c1). EvalBench reviewed at code level per owner: AgentEvaluator is CLI-coding-agent-only; DataAgentEvaluator/querydata is the right fit for ask_data.
+- 2026-07-23T21:40Z [milestone] v4 candidate scored 13/15 = baseline → prod flipped to v4 same day; ask_data generates observed_at_utc + is_estimated=false (f209785). v5 hillclimb candidates logged in autoctx/state.md: rain vocabulary facet; is_estimated-vs-reliable facet competition.
+- 2026-07-23T22:57Z [learning] Full-fleet gap-fill dry-run caught two estimation-design flaws before touching prod: battery is a status flag (synthetic rows carry no information) and wind_direction is circular (linear interpolation across 359°→1° is wrong). Both excluded (1d3cf13). Applied: 26,426 rows, outdoor temp coverage 90.5% → 99.9%.
+- 2026-07-23T05:00Z [incident] Prod ingest stalled overnight Jul 22 18:15 PT → Jul 23 morning (all sensors — station/AWN side), discovered via the eval seed snapshot; recovered without intervention. Exactly the class of event the daily report exists for.
+- 2026-07-25T04:47Z [friction] Gmail OAuth doc had drifted badly — Google renamed the console to "Google Auth Platform" (Branding/Audience/Clients). Replaced manual steps with scripts/setup-gmail-oauth.py (loopback flow + PKCE, Secret Manager writes, SA grants) (7081579). [learning] Testing-status apps get 7-day refresh tokens — the app must be published "In production" or the daily report silently dies a week later.
+- 2026-07-25T05:00Z [decision] Owner created dedicated sender account weatherbot.mailsender@gmail.com; reports go to andybrook@gmail.com.
+- 2026-07-25T06:00Z [milestone] Daily outage report live (#14 closed): 8am PT schedule, end-to-end send verified. First run immediately surfaced an ACTIVE Pool-array outage (~353 min behind) — the feature earned its keep on day one.
+- 2026-09-18T23:20Z [step] License housekeeping: Apache-2.0 appendix copyright line (6baed36), per the owner's license policy (Apache-2.0 verbatim for code).
+- 2026-10-16T20:30Z [step] Journal created per new global journal policy; backfilled from git history, issues #13–#15, repo docs, and session transcripts.
