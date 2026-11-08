@@ -35,7 +35,7 @@ jobs:
       - uses: ./.github/actions/deps-toolchain
       - run: uv sync --locked
       - run: uv run --no-sync python -m compileall -q weatherbot_ingest
-      - run: uv run --no-sync python -c "import weatherbot_ingest.cli, weatherbot_ingest.outage_report, weatherbot_ingest.gap_fill"
+      - run: uv run --no-sync python -c "import weatherbot_ingest.cli, weatherbot_ingest.outage_report, weatherbot_ingest.gap_fill, googleapiclient.discovery, google.oauth2.credentials"
       - run: uv run --no-sync weatherbot --help
 
   agent:

@@ -26,8 +26,9 @@ name: deploy
 # in ci.yml after it merges a Dependabot PR; a merge made with GITHUB_TOKEN
 # fires no push event).
 # After deploying, `smoke` checks the IAM gate (403 without a token), calls each
-# toolbox with the deploy SA's identity token, and waits for the next scheduled
-# weatherbot-sync execution on the new image to succeed. If the deploy or the
+# toolbox with the deploy SA's identity token, waits for the next scheduled
+# weatherbot-sync execution on the new image to succeed, and runs the outage
+# report once as a dry run (no --send, so no email). If the deploy or the
 # smoke test fails, `rollback` restores the previous revisions and job images
 # and fails the run.
 on:
@@ -72,7 +73,7 @@ jobs:
         run: |
           uv sync --locked
           uv run --no-sync python -m compileall -q weatherbot_ingest
-          uv run --no-sync python -c "import weatherbot_ingest.cli, weatherbot_ingest.outage_report, weatherbot_ingest.gap_fill"
+          uv run --no-sync python -c "import weatherbot_ingest.cli, weatherbot_ingest.outage_report, weatherbot_ingest.gap_fill, googleapiclient.discovery, google.oauth2.credentials"
           uv run --no-sync weatherbot --help >/dev/null
       - name: agent
         working-directory: agent
@@ -303,8 +304,7 @@ jobs:
           IMAGE: ${{ needs.deploy.outputs.sync_image }}
         run: |
           set -euo pipefail
-          # Cloud Scheduler starts it every 5 minutes. weatherbot-outage-report shares the image
-          # but is never run here (it sends email); its next 08:00 PT run is the check.
+          # Cloud Scheduler starts it every 5 minutes.
           for _ in $(seq 1 50); do
             ex=$(gcloud run jobs executions list --job weatherbot-sync --project "$PROJECT" --region "$REGION" --limit 20 --format=json \
               | jq -c --arg i "$IMAGE" '[.[] | select(.spec.template.spec.containers[0].image == $i)] | sort_by(.metadata.creationTimestamp) | .[0] // empty')
@@ -322,6 +322,14 @@ jobs:
             sleep 20
           done
           echo "::error::no execution on the new image finished within ~16 minutes"; exit 1
+      - name: weatherbot-outage-report on the new image, dry run (no email)
+        if: needs.deploy.outputs.ingest == 'true'
+        run: |
+          set -euo pipefail
+          # Without --send the report is only printed (to the job's Cloud Logging), never emailed;
+          # it reads the DB and builds the report, which is everything but the Gmail call.
+          gcloud run jobs execute weatherbot-outage-report --project "$PROJECT" --region "$REGION" \
+            --args=outage-report --wait --format='value(metadata.name)'
 
   rollback:
     needs: [deploy, smoke]
