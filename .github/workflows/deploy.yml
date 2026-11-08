@@ -94,7 +94,7 @@ jobs:
       ingest: ${{ steps.plan.outputs.ingest }}
       toolbox: ${{ steps.plan.outputs.toolbox }}
       prev: ${{ steps.plan.outputs.prev }}
-      sync_image: ${{ steps.plan.outputs.sync_image }}
+      sync_gen: ${{ steps.ingest.outputs.sync_gen }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -191,6 +191,7 @@ jobs:
           chmod +x "$RUNNER_TEMP/build.sh"
 
       - name: ingest - build and point the jobs at the new image (infra/04, 06)
+        id: ingest
         if: steps.plan.outputs.ingest == 'true'
         env:
           IMAGE: ${{ steps.plan.outputs.sync_image }}
@@ -201,6 +202,8 @@ jobs:
             gcloud run jobs update "$j" --project "$PROJECT" --region "$REGION" --image "$IMAGE" --quiet >/dev/null
             echo "job $j -> $IMAGE"
           done
+          # Executions record the image by digest, not tag; the job generation tells new from old.
+          echo "sync_gen=$(gcloud run jobs describe weatherbot-sync --project "$PROJECT" --region "$REGION" --format='value(metadata.generation)')" >> "$GITHUB_OUTPUT"
 
       - name: toolbox - build and roll both services (infra/05, 08)
         if: steps.plan.outputs.toolbox == 'true'
@@ -301,13 +304,15 @@ jobs:
       - name: Next scheduled weatherbot-sync run on the new image succeeds
         if: needs.deploy.outputs.ingest == 'true'
         env:
-          IMAGE: ${{ needs.deploy.outputs.sync_image }}
+          GEN: ${{ needs.deploy.outputs.sync_gen }}
         run: |
           set -euo pipefail
-          # Cloud Scheduler starts it every 5 minutes.
+          [ -n "$GEN" ] || { echo "::error::no job generation from the deploy job"; exit 1; }
+          # Cloud Scheduler starts it every 5 minutes. An execution of job generation >= GEN runs
+          # the new image (executions name the image by digest, so the tag cannot be matched).
           for _ in $(seq 1 50); do
             ex=$(gcloud run jobs executions list --job weatherbot-sync --project "$PROJECT" --region "$REGION" --limit 20 --format=json \
-              | jq -c --arg i "$IMAGE" '[.[] | select(.spec.template.spec.containers[0].image == $i)] | sort_by(.metadata.creationTimestamp) | .[0] // empty')
+              | jq -c --argjson g "$GEN" '[.[] | select((.metadata.labels["run.googleapis.com/jobGeneration"] | tonumber) >= $g)] | sort_by(.metadata.creationTimestamp) | .[0] // empty')
             if [ -n "$ex" ]; then
               name=$(jq -r .metadata.name <<<"$ex")
               st=$(jq -r '.status.conditions[] | select(.type == "Completed") | .status' <<<"$ex")
