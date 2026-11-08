@@ -10,5 +10,4 @@ __pycache__
 .env
 .env.*
 .adk
-uv.lock
 *.md
