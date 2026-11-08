@@ -23,6 +23,9 @@ updates:
         update-types: [minor, patch]
   - package-ecosystem: docker
     directories:
+      # Dependabot's docker updater reads any file whose name contains
+      # "dockerfile", so /agent covers agent/Dockerfile.toolbox.
+      - "/agent"
       - "/ingest"
       - "/scripts/gda-egress-test"
     schedule:
