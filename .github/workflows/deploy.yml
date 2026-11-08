@@ -1,0 +1,365 @@
+name: deploy
+
+# Production deploy (dependency program, AndyFooBlah/andy-private-docs#57).
+# Keyless: GitHub's OIDC token is exchanged through Workload Identity
+# Federation for github-deploy@weatherbot-prod (the provider only accepts this
+# repo on refs/heads/main).
+#
+# Two components, each redeployed only when its files changed since the commit
+# that is live now (read from the live image tag, which is a git sha):
+#   ingest   ingest/**                          -> image sync:<sha>, Cloud Run jobs
+#                                                  weatherbot-sync, weatherbot-outage-report
+#   toolbox  agent/Dockerfile.toolbox,          -> image toolbox:<sha>, Cloud Run services
+#            agent/toolbox.yaml                    weatherbot-toolbox, weatherbot-toolbox-eval
+# A live tag that is not a commit on main (a hand-built image) falls back to the
+# pushed range (push) or the last commit (dispatch). `force` on a manual
+# dispatch redeploys regardless. The Python agent in agent/ is local-only and
+# not deployed.
+#
+# This does what infra/04, 05, 06 and 08 do on every run (build on Cloud Build,
+# point the job/service at the new image) and nothing else: it changes only the
+# image, so env vars, secrets, service accounts, schedules, IAM and the
+# Cloud SQL grants those scripts set up stay exactly as they are. Re-run the
+# scripts by hand to change any of that.
+#
+# Triggers: push to main, and workflow_dispatch (used by the `deps / merge` job
+# in ci.yml after it merges a Dependabot PR; a merge made with GITHUB_TOKEN
+# fires no push event).
+# After deploying, `smoke` checks the IAM gate (403 without a token), calls each
+# toolbox with the deploy SA's identity token, and waits for the next scheduled
+# weatherbot-sync execution on the new image to succeed. If the deploy or the
+# smoke test fails, `rollback` restores the previous revisions and job images
+# and fails the run.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Redeploy regardless of changes: ingest, toolbox, all (comma-separated), or empty"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false # never kill a deploy mid-flight
+
+env:
+  PROJECT: weatherbot-prod
+  REGION: us-central1
+  AR: us-central1-docker.pkg.dev/weatherbot-prod/weatherbot
+  WIF_PROVIDER: projects/97468839894/locations/global/workloadIdentityPools/github/providers/weatherbot-repo
+  DEPLOY_SA: github-deploy@weatherbot-prod.iam.gserviceaccount.com
+  INGEST_JOBS: weatherbot-sync weatherbot-outage-report
+  TOOLBOX_SERVICES: weatherbot-toolbox weatherbot-toolbox-eval
+  # The toolbox URLs are kept out of this public repo: they come from the Actions
+  # secrets TOOLBOX_URL and TOOLBOX_EVAL_URL (so they are masked in the logs), and
+  # gcloud output that would print them is scrubbed.
+
+jobs:
+  test:
+    # The same checks as ci.yml, on the commit being deployed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/deps-toolchain
+      - name: ingest
+        working-directory: ingest
+        run: |
+          uv sync --locked
+          uv run --no-sync python -m compileall -q weatherbot_ingest
+          uv run --no-sync python -c "import weatherbot_ingest.cli, weatherbot_ingest.outage_report, weatherbot_ingest.gap_fill"
+          uv run --no-sync weatherbot --help >/dev/null
+      - name: agent
+        working-directory: agent
+        run: |
+          uv sync --locked
+          uv run --no-sync python -m compileall -q weatherbot_agent
+          uv run --no-sync python -c "import weatherbot_agent.agent as a; assert a.root_agent.name"
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # OIDC token for google-github-actions/auth
+    outputs:
+      ingest: ${{ steps.plan.outputs.ingest }}
+      toolbox: ${{ steps.plan.outputs.toolbox }}
+      prev: ${{ steps.plan.outputs.prev }}
+      sync_image: ${{ steps.plan.outputs.sync_image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the plan diffs against the live commit
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Plan (what changed since the live commit) and record rollback targets
+        id: plan
+        env:
+          FORCE: ${{ inputs.force }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse --short=7 HEAD)
+          fallback=$([ "${{ github.event_name }}" = push ] && echo "$BEFORE" || echo HEAD~1)
+          git cat-file -e "$fallback^{commit}" 2>/dev/null || fallback=""
+          prev='{"jobs":{},"services":{}}'
+          ctx=""
+
+          # decide <component> <live tags...> -- <paths...>
+          decide() {
+            local comp=$1; shift; local tags=(); while [ "$1" != -- ]; do tags+=("$1"); shift; done; shift
+            if [[ ",$FORCE," == *",all,"* || ",$FORCE," == *",$comp,"* ]]; then echo "forced"; return; fi
+            local t
+            for t in "${tags[@]}"; do
+              if git cat-file -e "$t^{commit}" 2>/dev/null; then
+                git diff --quiet "$t" HEAD -- "$@" || { echo "changed since live $t"; return; }
+              elif [ -n "$fallback" ]; then
+                git diff --quiet "$fallback" HEAD -- "$@" || { echo "changed in ${fallback:0:7}..$sha (live $t is not on main)"; return; }
+              else
+                echo "live $t is unknown and there is no base to diff"; return
+              fi
+            done
+            echo ""
+          }
+
+          tags=()
+          for j in $INGEST_JOBS; do
+            img=$(gcloud run jobs describe "$j" --project "$PROJECT" --region "$REGION" --format='value(spec.template.spec.template.spec.containers[0].image)')
+            [ -n "$img" ] || { echo "::error::cannot read job $j"; exit 1; }
+            prev=$(jq -c --arg j "$j" --arg i "$img" '.jobs[$j]=$i' <<<"$prev"); tags+=("${img##*:}")
+          done
+          ingest_why=$(decide ingest "${tags[@]}" -- ingest)
+
+          tags=()
+          for s in $TOOLBOX_SERVICES; do
+            svc=$(gcloud run services describe "$s" --project "$PROJECT" --region "$REGION" --format=json)
+            rev=$(jq -r '[.status.traffic[] | select(.percent == 100)][0].revisionName // empty' <<<"$svc")
+            [ -n "$rev" ] || { echo "::error::cannot read the serving revision of $s"; exit 1; }
+            prev=$(jq -c --arg s "$s" --arg r "$rev" '.services[$s]=$r' <<<"$prev")
+            tags+=("$(jq -r '.spec.template.spec.containers[0].image | split(":") | last' <<<"$svc")")
+            [ "$s" = weatherbot-toolbox ] && ctx=$(jq -r '[.spec.template.spec.containers[0].env[]? | select(.name=="WEATHERBOT_GDA_CONTEXT_SET_ID") | .value][0] // ""' <<<"$svc")
+          done
+          toolbox_why=$(decide toolbox "${tags[@]}" -- agent/Dockerfile.toolbox agent/toolbox.yaml)
+
+          echo "Live before deploy: $prev"
+          echo "ingest:  ${ingest_why:-unchanged, skipped}"
+          echo "toolbox: ${toolbox_why:-unchanged, skipped}"
+          {
+            echo "sha=$sha"
+            echo "prev=$prev"
+            echo "ingest=$([ -n "$ingest_why" ] && echo true || echo false)"
+            echo "toolbox=$([ -n "$toolbox_why" ] && echo true || echo false)"
+            echo "keep_context=$([ -n "$ctx" ] && echo true || echo false)"
+            echo "sync_image=$AR/sync:$sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build helper
+        run: |
+          cat > "$RUNNER_TEMP/build.sh" <<'EOF'
+          #!/usr/bin/env bash
+          # build.sh <source dir> <image>: Cloud Build, as the infra scripts do. Async and
+          # polled, because streaming logs needs project Viewer, which the deploy SA lacks.
+          set -euo pipefail
+          id=$(gcloud builds submit "$1" --tag "$2" --project "$PROJECT" --region "$REGION" --async --format='value(id)')
+          echo "Cloud Build $id: $2"
+          for _ in $(seq 1 120); do
+            st=$(gcloud builds describe "$id" --project "$PROJECT" --region "$REGION" --format='value(status)')
+            case $st in
+              SUCCESS) echo "built $2"; exit 0 ;;
+              FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED)
+                echo "::error::Cloud Build $id ended $st"
+                gcloud builds describe "$id" --project "$PROJECT" --region "$REGION" --format='value(failureInfo.detail)' || true
+                exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Cloud Build $id still running after 20 minutes"; exit 1
+          EOF
+          chmod +x "$RUNNER_TEMP/build.sh"
+
+      - name: ingest - build and point the jobs at the new image (infra/04, 06)
+        if: steps.plan.outputs.ingest == 'true'
+        env:
+          IMAGE: ${{ steps.plan.outputs.sync_image }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/build.sh" ingest "$IMAGE"
+          for j in $INGEST_JOBS; do
+            gcloud run jobs update "$j" --project "$PROJECT" --region "$REGION" --image "$IMAGE" --quiet >/dev/null
+            echo "job $j -> $IMAGE"
+          done
+
+      - name: toolbox - build and roll both services (infra/05, 08)
+        if: steps.plan.outputs.toolbox == 'true'
+        env:
+          IMAGE: ${{ env.AR }}/toolbox:${{ steps.plan.outputs.sha }}
+          KEEP_CONTEXT: ${{ steps.plan.outputs.keep_context }}
+        run: |
+          set -euo pipefail
+          scrub() { sed -E 's#https?://[^[:space:]]+#<url>#g'; }
+          # Same temp build context as infra/05-deploy-toolbox.sh. That script strips the
+          # agentContextReference block when no context set is configured; here "configured"
+          # means the live prod service has WEATHERBOT_GDA_CONTEXT_SET_ID set.
+          dir=$(mktemp -d)
+          cp agent/Dockerfile.toolbox "$dir/Dockerfile"
+          if [ "$KEEP_CONTEXT" = true ]; then
+            cp agent/toolbox.yaml "$dir/toolbox.yaml"
+          else
+            awk '/# ⟪AGENT_CONTEXT_BEGIN⟫/ { skip = 1 } !skip { print } /# ⟪AGENT_CONTEXT_END⟫/ { skip = 0 }' \
+              agent/toolbox.yaml > "$dir/toolbox.yaml"
+          fi
+          "$RUNNER_TEMP/build.sh" "$dir" "$IMAGE"
+          for s in $TOOLBOX_SERVICES; do
+            gcloud run services update "$s" --project "$PROJECT" --region "$REGION" --image "$IMAGE" --quiet 2>&1 | scrub
+            # A past rollback pins traffic to one revision; send it back to latest.
+            gcloud run services update-traffic "$s" --project "$PROJECT" --region "$REGION" --to-latest --quiet 2>&1 | scrub
+            echo "service $s -> $IMAGE"
+          done
+
+  smoke:
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TOOLBOX_URL: ${{ secrets.TOOLBOX_URL }}
+      TOOLBOX_EVAL_URL: ${{ secrets.TOOLBOX_EVAL_URL }}
+    steps:
+      - run: '[ -n "$TOOLBOX_URL" ] && [ -n "$TOOLBOX_EVAL_URL" ] || { echo "::error::set the TOOLBOX_URL and TOOLBOX_EVAL_URL secrets"; exit 1; }'
+      # The IAM gate is on: no token, no entry.
+      - uses: AndyFooBlah/uptime/smoke@main
+        with:
+          url: ${{ secrets.TOOLBOX_URL }}/
+          status: "403"
+      - uses: AndyFooBlah/uptime/smoke@main
+        with:
+          url: ${{ secrets.TOOLBOX_EVAL_URL }}/
+          status: "403"
+      - id: tok
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ secrets.TOOLBOX_URL }}
+          id_token_include_email: true
+      - id: tok_eval
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ secrets.TOOLBOX_EVAL_URL }}
+          id_token_include_email: true
+      - name: Toolbox health (both services), as the deploy SA
+        env:
+          TOK: ${{ steps.tok.outputs.id_token }}
+          TOK_EVAL: ${{ steps.tok_eval.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          check() { # check <name> <url> <token>
+            local name=$1 url=$2 tok=$3 body
+            for _ in 1 2 3; do # scale-to-zero cold start
+              body=$(curl -fsS -m 60 -H "Authorization: Bearer $tok" "$url/" || true)
+              grep -q "Hello, World" <<<"$body" && break; sleep 15
+            done
+            grep -q "Hello, World" <<<"$body" || { echo "::error::$name: / did not answer"; return 1; }
+            # tools/list: toolbox.yaml loaded with every tool.
+            curl -fsS -m 60 -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
+              -H 'Accept: application/json, text/event-stream' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$url/mcp" \
+              | jq -e '[.result.tools[].name] | index("list_stations") and index("ask_data") and index("record_event")' >/dev/null \
+              || { echo "::error::$name: tools/list is missing tools"; return 1; }
+            # list_stations: a read-only SQL tool, so this proves the DB password secret and
+            # the Cloud SQL connection. (Never ask_data here: it is a paid Gemini call.)
+            curl -fsS -m 60 -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
+              -H 'Accept: application/json, text/event-stream' \
+              -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_stations","arguments":{}}}' "$url/mcp" \
+              | jq -e '.error == null and (.result.isError | not) and (.result.content | length > 0)' >/dev/null \
+              || { echo "::error::$name: list_stations failed"; return 1; }
+            echo "$name: healthy (/, tools/list, list_stations)"
+          }
+          check weatherbot-toolbox "$TOOLBOX_URL" "$TOK"
+          check weatherbot-toolbox-eval "$TOOLBOX_EVAL_URL" "$TOK_EVAL"
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        if: needs.deploy.outputs.ingest == 'true'
+      - name: Next scheduled weatherbot-sync run on the new image succeeds
+        if: needs.deploy.outputs.ingest == 'true'
+        env:
+          IMAGE: ${{ needs.deploy.outputs.sync_image }}
+        run: |
+          set -euo pipefail
+          # Cloud Scheduler starts it every 5 minutes. weatherbot-outage-report shares the image
+          # but is never run here (it sends email); its next 08:00 PT run is the check.
+          for _ in $(seq 1 50); do
+            ex=$(gcloud run jobs executions list --job weatherbot-sync --project "$PROJECT" --region "$REGION" --limit 20 --format=json \
+              | jq -c --arg i "$IMAGE" '[.[] | select(.spec.template.spec.containers[0].image == $i)] | sort_by(.metadata.creationTimestamp) | .[0] // empty')
+            if [ -n "$ex" ]; then
+              name=$(jq -r .metadata.name <<<"$ex")
+              st=$(jq -r '.status.conditions[] | select(.type == "Completed") | .status' <<<"$ex")
+              case $st in
+                True) echo "$name on the new image succeeded"; exit 0 ;;
+                False) echo "::error::$name on the new image failed"; exit 1 ;;
+              esac
+              echo "$name is running..."
+            else
+              echo "waiting for the next scheduled execution..."
+            fi
+            sleep 20
+          done
+          echo "::error::no execution on the new image finished within ~16 minutes"; exit 1
+
+  rollback:
+    needs: [deploy, smoke]
+    if: >-
+      always() && (needs.deploy.result == 'failure' || needs.smoke.result == 'failure')
+      && needs.deploy.outputs.prev != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PREV: ${{ needs.deploy.outputs.prev }}
+      DID_INGEST: ${{ needs.deploy.outputs.ingest }}
+      DID_TOOLBOX: ${{ needs.deploy.outputs.toolbox }}
+    steps:
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+      - name: Restore the previous job images and service revisions
+        run: |
+          set -euo pipefail
+          if [ "$DID_INGEST" = true ]; then
+            for j in $(jq -r '.jobs | keys[]' <<<"$PREV"); do
+              img=$(jq -r --arg j "$j" '.jobs[$j]' <<<"$PREV")
+              gcloud run jobs update "$j" --project "$PROJECT" --region "$REGION" --image "$img" --quiet >/dev/null
+              echo "job $j -> $img"
+            done
+          fi
+          if [ "$DID_TOOLBOX" = true ]; then
+            for s in $(jq -r '.services | keys[]' <<<"$PREV"); do
+              rev=$(jq -r --arg s "$s" '.services[$s]' <<<"$PREV")
+              gcloud run services update-traffic "$s" --project "$PROJECT" --region "$REGION" --to-revisions="$rev=100" --quiet 2>&1 \
+                | sed -E 's#https?://[^[:space:]]+#<url>#g'
+              echo "service $s -> $rev"
+            done
+          fi
+          echo "::error::Deploy or smoke test failed; rolled back to the images/revisions that were live before this run"
+          exit 1
