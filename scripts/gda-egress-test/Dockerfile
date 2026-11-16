@@ -3,7 +3,7 @@
 # same region. Goal: confirm whether the PermissionDenied is environmental
 # to Cloud Run egress, or specific to the toolbox's Go SDK call site.
 
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 RUN pip install --no-cache-dir \
       google-cloud-geminidataanalytics \
